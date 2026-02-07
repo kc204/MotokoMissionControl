@@ -10,9 +10,10 @@ dotenv.config({ path: ".env.local" });
 
 const client = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
 
-// Use the key we found in configuration (Google Gemini)
-// In production, this should be in .env.local
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "AIzaSyCZb-gMt20CboWu5Rk-Ik8VW1fOF7vfJq0");
+if (!process.env.GOOGLE_API_KEY) {
+  throw new Error("GOOGLE_API_KEY is required in .env.local");
+}
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 console.log("🧠 Hive Mind Active: Agents are now listening...");

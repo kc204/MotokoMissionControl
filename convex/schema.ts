@@ -2,6 +2,12 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  projects: defineTable({
+    name: v.string(),
+    color: v.string(),
+    icon: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_name", ["name"]),
   agents: defineTable({
     name: v.string(),
     role: v.string(),
@@ -22,6 +28,8 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
+    .index("by_name", ["name"])
+    .index("by_role", ["role"])
     .index("by_status", ["status"])
     .index("by_sessionKey", ["sessionKey"])
     .index("by_currentTaskId", ["currentTaskId"]),
@@ -50,7 +58,89 @@ export default defineSchema({
     completedAt: v.optional(v.number()),
   })
     .index("by_status", ["status"])
+    .index("by_createdAt", ["createdAt"])
     .index("by_projectId", ["projectId"]),
+  messages: defineTable({
+    taskId: v.optional(v.id("tasks")),
+    fromAgentId: v.optional(v.id("agents")),
+    agentId: v.optional(v.id("agents")), // legacy compatibility
+    fromUser: v.optional(v.boolean()),
+    content: v.optional(v.string()),
+    text: v.optional(v.string()), // legacy compatibility
+    mentions: v.optional(v.array(v.string())),
+    channel: v.optional(v.string()), // "hq" or "task:<taskId>" for compatibility
+    createdAt: v.number(),
+  })
+    .index("by_taskId", ["taskId"])
+    .index("by_channel", ["channel"])
+    .index("by_createdAt", ["createdAt"]),
+  activities: defineTable({
+    type: v.union(
+      v.literal("task_created"),
+      v.literal("task_updated"),
+      v.literal("message_sent"),
+      v.literal("agent_status_changed"),
+      v.literal("document_created")
+    ),
+    agentId: v.optional(v.id("agents")),
+    taskId: v.optional(v.id("tasks")),
+    projectId: v.optional(v.id("projects")),
+    message: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_taskId", ["taskId"])
+    .index("by_agentId", ["agentId"]),
+  documents: defineTable({
+    title: v.string(),
+    content: v.string(),
+    type: v.union(
+      v.literal("deliverable"),
+      v.literal("research"),
+      v.literal("spec"),
+      v.literal("note")
+    ),
+    taskId: v.optional(v.id("tasks")),
+    projectId: v.optional(v.id("projects")),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_taskId", ["taskId"])
+    .index("by_projectId", ["projectId"])
+    .index("by_createdAt", ["createdAt"]),
+  notifications: defineTable({
+    targetAgentId: v.id("agents"),
+    content: v.string(),
+    sourceTaskId: v.optional(v.id("tasks")),
+    sourceMessageId: v.optional(v.id("messages")),
+    delivered: v.boolean(),
+    deliveredAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    attempts: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_targetAgentId", ["targetAgentId"])
+    .index("by_delivered", ["delivered"]),
+  taskSubscriptions: defineTable({
+    taskId: v.id("tasks"),
+    agentId: v.id("agents"),
+    reason: v.union(
+      v.literal("assigned"),
+      v.literal("mentioned"),
+      v.literal("commented"),
+      v.literal("manual")
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_taskId", ["taskId"])
+    .index("by_agentId", ["agentId"])
+    .index("by_taskId_agentId", ["taskId", "agentId"]),
+  settings: defineTable({
+    key: v.string(),
+    value: v.any(),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
   heartbeats: defineTable({
     agentId: v.id("agents"),
     status: v.union(
@@ -73,10 +163,4 @@ export default defineSchema({
     .index("by_taskId", ["taskId"])
     .index("by_agentId", ["agentId"])
     .index("by_taskId_agentId", ["taskId", "agentId"]),
-  messages: defineTable({
-    channel: v.string(), // "hq" or "task:<taskId>"
-    agentId: v.optional(v.id("agents")), // null if system/user
-    text: v.string(),
-    createdAt: v.number(),
-  }).index("by_channel", ["channel"]),
 });

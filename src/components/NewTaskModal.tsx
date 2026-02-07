@@ -8,7 +8,7 @@ export default function NewTaskModal({ isOpen, onClose }: { isOpen: boolean; onC
   const createTask = useMutation(api.tasks.create);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [priority, setPriority] = useState("medium");
+  const [priority, setPriority] = useState<"low" | "medium" | "high" | "urgent">("medium");
 
   if (!isOpen) return null;
 
@@ -55,7 +55,7 @@ export default function NewTaskModal({ isOpen, onClose }: { isOpen: boolean; onC
             <label className="block text-xs font-medium text-zinc-400 mb-1">Priority</label>
             <select
               value={priority}
-              onChange={(e) => setPriority(e.target.value)}
+              onChange={(e) => setPriority(e.target.value as "low" | "medium" | "high" | "urgent")}
               className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-white focus:border-blue-500 outline-none"
             >
               <option value="low">Low</option>

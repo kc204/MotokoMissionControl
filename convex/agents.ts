@@ -20,8 +20,18 @@ export const getByName = query({
   handler: async (ctx, args) => {
     return await ctx.db
       .query("agents")
-      .filter((q) => q.eq(q.field("name"), args.name))
+      .withIndex("by_name", (q) => q.eq("name", args.name))
       .first();
+  },
+});
+
+export const listByRole = query({
+  args: { role: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("agents")
+      .withIndex("by_role", (q) => q.eq("role", args.role))
+      .collect();
   },
 });
 
@@ -37,18 +47,25 @@ export const updateStatus = mutation({
   },
   handler: async (ctx, args) => {
     const { id, status, message } = args;
-    
-    // Update agent status
+    const agent = await ctx.db.get(id);
+    if (!agent) throw new Error("Agent not found");
+
     await ctx.db.patch(id, {
       status,
       updatedAt: Date.now(),
     });
 
-    // Log heartbeat
     await ctx.db.insert("heartbeats", {
       agentId: id,
       status: status === "active" ? "working" : "ok",
       message,
+      createdAt: Date.now(),
+    });
+
+    await ctx.db.insert("activities", {
+      type: "agent_status_changed",
+      agentId: id,
+      message: `${agent.name} status changed to ${status}${message ? ` (${message})` : ""}`,
       createdAt: Date.now(),
     });
   },
@@ -57,7 +74,12 @@ export const updateStatus = mutation({
 export const updateModel = mutation({
   args: {
     id: v.id("agents"),
-    modelType: v.literal("thinking"), // simplified for now, can add others
+    modelType: v.union(
+      v.literal("thinking"),
+      v.literal("execution"),
+      v.literal("heartbeat"),
+      v.literal("fallback")
+    ),
     modelName: v.string(),
   },
   handler: async (ctx, args) => {
@@ -65,6 +87,6 @@ export const updateModel = mutation({
     if (!agent) throw new Error("Agent not found");
 
     const models = { ...agent.models, [args.modelType]: args.modelName };
-    await ctx.db.patch(args.id, { models });
+    await ctx.db.patch(args.id, { models, updatedAt: Date.now() });
   },
 });

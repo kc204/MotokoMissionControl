@@ -26,6 +26,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { useState, useMemo } from "react";
 
 const COLUMNS = ["inbox", "assigned", "in_progress", "review", "done"];
+type TaskStatus = "inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked";
 const LABELS: Record<string, string> = {
   inbox: "Inbox",
   assigned: "To Do",
@@ -38,8 +39,8 @@ interface Task {
   _id: Id<"tasks">;
   title: string;
   description: string;
-  status: string;
-  priority: string;
+  status: TaskStatus;
+  priority: "low" | "medium" | "high" | "urgent";
 }
 
 function SortableItem({ task }: { task: Task }) {
@@ -116,7 +117,7 @@ export default function KanbanBoard() {
 
     // Check if dropped on a column container (which has ID = status)
     if (COLUMNS.includes(over.id as string)) {
-      const newStatus = over.id as string;
+      const newStatus = over.id as TaskStatus;
       const taskId = active.id as Id<"tasks">;
       
       // Update local state optimistic UI could go here, but convex is fast enough
