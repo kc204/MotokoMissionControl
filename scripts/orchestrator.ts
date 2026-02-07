@@ -1,10 +1,10 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
 import os from "os";
+import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
 
-dotenv.config({ path: ".env.local" });
+loadMissionControlEnv();
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
@@ -12,6 +12,10 @@ if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.loca
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const DEDUPE_KEY = "orchestrator:last_hq_message_id";
+const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
+const LAST_DISPATCH_STARTED_KEY = "probe:last_dispatch_started";
+const LAST_REPORT_CHAT_KEY = "probe:last_report_chat_write";
+const reportScriptPath = buildTsxCommand("report.ts");
 
 const client = new ConvexHttpClient(convexUrl);
 
@@ -47,11 +51,7 @@ function agentIdFromSessionKey(sessionKey: string): string {
   return "main";
 }
 
-function routeAgentName(
-  text: string,
-  mentions: string[],
-  knownAgentNames: string[]
-): string {
+function routeAgentName(text: string, mentions: string[], knownAgentNames: string[]): string {
   for (const tag of mentions) {
     const candidate = tag.replace(/^@/, "").toLowerCase();
     const matched = knownAgentNames.find((n) => n.toLowerCase() === candidate);
@@ -67,39 +67,140 @@ function routeAgentName(
 }
 
 function buildPrompt(agentName: string, userMessage: string) {
+  const cleanTask = userMessage.replace(/\s+/g, " ").trim();
   return [
-    `You are ${agentName}, operating inside Mission Control.`,
-    "You MUST report back through Mission Control scripts in this workspace.",
-    `Use this command for chat replies: npx tsx scripts/report.ts chat ${agentName} "YOUR_MESSAGE"`,
-    `Use this command for status updates: npx tsx scripts/report.ts heartbeat ${agentName} active "Working on X"`,
-    "",
-    "Task:",
-    userMessage,
-    "",
-    "Requirements:",
-    "1) Set your status to active first.",
-    "2) Produce a concise useful reply for the team.",
-    "3) Post the reply via scripts/report.ts chat.",
-    "4) Set your status back to idle when done.",
-  ].join("\n");
+    `You are ${agentName} operating inside Mission Control.`,
+    `Task from HQ: ${cleanTask}`,
+    `Do in order: (1) ${reportScriptPath} heartbeat ${agentName} active \"Working on HQ task\";`,
+    `(2) perform the task;`,
+    `(3) post your actual answer via ${reportScriptPath} chat ${agentName} \"YOUR_FINAL_ANSWER\";`,
+    `(4) ${reportScriptPath} heartbeat ${agentName} idle \"Task complete\".`,
+    "Your final answer must be plain text, specific, and non-empty.",
+    "Do not output NO_REPLY. If a report command fails, include full error and retry once.",
+  ].join(" ");
 }
 
-async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+type OpenClawRunResult = {
+  assistantText: string;
+};
+
+function extractAssistantText(payload: unknown): string {
+  const data = payload as
+    | {
+        result?: { payloads?: Array<{ text?: string | null }> };
+      }
+    | undefined;
+
+  const payloads = data?.result?.payloads;
+  if (!Array.isArray(payloads)) return "";
+
+  const parts = payloads
+    .map((item) => (typeof item?.text === "string" ? item.text.trim() : ""))
+    .filter(Boolean);
+  return parts.join("\n\n").trim();
+}
+
+async function runOpenClawAgent(agentId: string, prompt: string): Promise<OpenClawRunResult> {
+  return await new Promise<OpenClawRunResult>((resolve, reject) => {
     const args = ["agent", "--agent", agentId, "--message", prompt, "--json"];
     const child = spawnOpenClaw(args);
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
       if (code === 0) {
-        resolve();
-        return;
+        try {
+          const parsed = JSON.parse(stdout);
+          resolve({ assistantText: extractAssistantText(parsed) });
+          return;
+        } catch {
+          resolve({ assistantText: "" });
+          return;
+        }
       }
       reject(new Error(stderr || `openclaw exited with code ${code}`));
     });
+  });
+}
+
+async function runOpenClawAgentWithRetry(agentId: string, prompt: string): Promise<OpenClawRunResult> {
+  try {
+    return await runOpenClawAgent(agentId, prompt);
+  } catch (firstError) {
+    const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
+    console.error(`[dispatch_retry] agent=${agentId} reason=${firstErrorMessage}`);
+    return await runOpenClawAgent(agentId, prompt);
+  }
+}
+
+async function getLatestAgentMessageInChannel(channel: string, agentId: string) {
+  const messages = await client.query(api.messages.list, { channel });
+  const own = messages.filter((m) => m.agentId === agentId);
+  return own.length === 0 ? null : own[own.length - 1];
+}
+
+async function persistFallbackHqMessage(args: {
+  channel: string;
+  agentDbId: string;
+  agentName: string;
+  assistantText: string;
+}) {
+  const fallbackText = args.assistantText.trim() || "No reply from agent.";
+  const messageId = await client.mutation(api.messages.send, {
+    channel: args.channel,
+    text: fallbackText,
+    agentId: args.agentDbId as any,
+  });
+  const now = Date.now();
+  await client.mutation(api.settings.set, {
+    key: LAST_REPORT_CHAT_KEY,
+    value: {
+      at: now,
+      agentName: args.agentName,
+      messageId,
+      preview: fallbackText.slice(0, 180),
+      source: "orchestrator_fallback",
+    },
+  });
+  console.log(
+    `[report_write_confirmed] channel=${args.channel} messageId=${messageId} agent=${args.agentName} source=orchestrator_fallback`
+  );
+}
+
+async function ensureHqReplyPersisted(args: {
+  channel: string;
+  agentDbId: string;
+  agentName: string;
+  beforeMessageId: string | null;
+  assistantText: string;
+}) {
+  const afterMessage = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
+  const noNewMessage = !afterMessage || afterMessage._id === args.beforeMessageId;
+  if (!noNewMessage) return;
+  await persistFallbackHqMessage(args);
+}
+
+async function runOpenClawAndEnsureReply(args: {
+  channel: string;
+  agentDbId: string;
+  agentName: string;
+  agentRuntimeId: string;
+  prompt: string;
+}) {
+  const before = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
+  const result = await runOpenClawAgentWithRetry(args.agentRuntimeId, args.prompt);
+  await ensureHqReplyPersisted({
+    channel: args.channel,
+    agentDbId: args.agentDbId,
+    agentName: args.agentName,
+    beforeMessageId: before?._id ?? null,
+    assistantText: result.assistantText,
   });
 }
 
@@ -113,7 +214,7 @@ async function selectPendingMessages(channel: string, explicitId?: string) {
 
   const pointer = await client.query(api.settings.get, { key: DEDUPE_KEY });
   const lastSeen = (pointer?.value as string | undefined) ?? null;
-  if (!lastSeen) return userMessages.slice(-1); // first run: only most recent
+  if (!lastSeen) return userMessages.slice(-1);
 
   const idx = userMessages.findIndex((m) => m._id === lastSeen);
   if (idx < 0) return userMessages.slice(-1);
@@ -143,7 +244,17 @@ async function main() {
 
     const targetAgentId = agentIdFromSessionKey(target.sessionKey);
     const prompt = buildPrompt(target.name, text);
-    console.log(`Routing message ${msg._id} -> ${target.name} (${targetAgentId})`);
+    const startedAt = Date.now();
+    console.log(`[dispatch_started] messageId=${msg._id} target=${target.name} agentId=${targetAgentId}`);
+    await client.mutation(api.settings.set, {
+      key: LAST_DISPATCH_STARTED_KEY,
+      value: {
+        at: startedAt,
+        messageId: msg._id,
+        targetName: target.name,
+        targetAgentId,
+      },
+    });
 
     await client.mutation(api.agents.updateStatus, {
       id: target._id,
@@ -152,7 +263,52 @@ async function main() {
     });
 
     try {
-      await runOpenClawAgent(targetAgentId, prompt);
+      await runOpenClawAndEnsureReply({
+        channel,
+        agentDbId: target._id,
+        agentName: target.name,
+        agentRuntimeId: targetAgentId,
+        prompt,
+      });
+      const completedAt = Date.now();
+      console.log(
+        `[dispatch_completed] messageId=${msg._id} target=${target.name} status=success durationMs=${
+          completedAt - startedAt
+        }`
+      );
+      await client.mutation(api.settings.set, {
+        key: LAST_DISPATCH_RESULT_KEY,
+        value: {
+          at: completedAt,
+          messageId: msg._id,
+          targetName: target.name,
+          targetAgentId,
+          status: "success",
+          durationMs: completedAt - startedAt,
+        },
+      });
+      await client.mutation(api.settings.set, { key: DEDUPE_KEY, value: msg._id });
+    } catch (error) {
+      const completedAt = Date.now();
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[dispatch_completed] messageId=${msg._id} target=${target.name} status=failed durationMs=${
+          completedAt - startedAt
+        } error=${errorMessage}`
+      );
+      await client.mutation(api.settings.set, {
+        key: LAST_DISPATCH_RESULT_KEY,
+        value: {
+          at: completedAt,
+          messageId: msg._id,
+          targetName: target.name,
+          targetAgentId,
+          status: "failed",
+          durationMs: completedAt - startedAt,
+          error: errorMessage.slice(0, 1000),
+        },
+      });
+      throw error;
     } finally {
       await client.mutation(api.agents.updateStatus, {
         id: target._id,
@@ -160,8 +316,6 @@ async function main() {
         message: "Awaiting next task",
       });
     }
-
-    await client.mutation(api.settings.set, { key: DEDUPE_KEY, value: msg._id });
   }
 }
 

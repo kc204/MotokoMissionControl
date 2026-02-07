@@ -1,10 +1,11 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
 import os from "os";
+import path from "path";
+import { loadMissionControlEnv, resolveMissionControlRoot, resolveScriptPath } from "./lib/mission-control";
 
-dotenv.config({ path: ".env.local" });
+loadMissionControlEnv();
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
@@ -15,6 +16,10 @@ const POLL_MS = Number(process.env.WATCHER_POLL_MS || 1000);
 const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 60000);
 const AUTH_SYNC_MS = Number(process.env.WATCHER_AUTH_SYNC_MS || 30000);
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
+const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
+const missionControlRoot = resolveMissionControlRoot();
+const tsxCliPath = path.join(missionControlRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const orchestratorScriptPath = resolveScriptPath("orchestrator.ts");
 
 const client = new ConvexHttpClient(convexUrl);
 const modelCache = new Map<string, string>();
@@ -108,8 +113,11 @@ async function syncAuthProfile() {
 async function triggerOrchestrator(messageId?: string) {
   if (orchestratorBusy) return;
   orchestratorBusy = true;
+  const startedAt = Date.now();
+  const mode = messageId ? "single_message" : "manual";
+  console.log(`[dispatch_started] source=watcher mode=${mode} messageId=${messageId ?? "-"}`);
   try {
-    const orchestratorArgs = ["./node_modules/tsx/dist/cli.mjs", "scripts/orchestrator.ts"];
+    const orchestratorArgs = [tsxCliPath, orchestratorScriptPath];
     if (messageId) {
       orchestratorArgs.push("--message-id", messageId);
     }
@@ -138,6 +146,33 @@ async function triggerOrchestrator(messageId?: string) {
         reject(new Error(stderr || `orchestrator exited with code ${code}`));
       });
     });
+    const completedAt = Date.now();
+    console.log(
+      `[dispatch_completed] source=watcher mode=${mode} status=success messageId=${
+        messageId ?? "-"
+      } durationMs=${completedAt - startedAt}`
+    );
+  } catch (error) {
+    const completedAt = Date.now();
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.log(
+      `[dispatch_completed] source=watcher mode=${mode} status=failed messageId=${
+        messageId ?? "-"
+      } durationMs=${completedAt - startedAt} error=${errorMessage}`
+    );
+    await client.mutation(api.settings.set, {
+      key: LAST_DISPATCH_RESULT_KEY,
+      value: {
+        at: completedAt,
+        status: "failed",
+        source: "watcher",
+        mode,
+        messageId: messageId ?? null,
+        durationMs: completedAt - startedAt,
+        error: errorMessage.slice(0, 1000),
+      },
+    });
+    throw error;
   } finally {
     orchestratorBusy = false;
   }
@@ -184,11 +219,21 @@ async function tick() {
 }
 
 async function main() {
-  console.log(`Watcher active. poll=${POLL_MS}ms`);
+  console.log(`Watcher active. poll=${POLL_MS}ms root=${missionControlRoot}`);
   while (true) {
     try {
       await tick();
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await client.mutation(api.settings.set, {
+        key: LAST_DISPATCH_RESULT_KEY,
+        value: {
+          at: Date.now(),
+          status: "failed",
+          source: "watcher",
+          error: errorMessage.slice(0, 1000),
+        },
+      });
       console.error("Watcher loop error:", error);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));

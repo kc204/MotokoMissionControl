@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import os from "os";
+import { buildTsxCommand } from "./lib/mission-control";
 
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
@@ -17,6 +18,7 @@ const SCHEDULES: Array<{ agentId: string; minuteOffset: number }> = [
   { agentId: "researcher", minuteOffset: 8 },
   { agentId: "monitor", minuteOffset: 12 },
 ];
+const HEARTBEAT_PREFIX = "mc-heartbeat-";
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -78,7 +80,13 @@ function cronExpr(offset: number): string {
 }
 
 function heartbeatMessage(agentId: string) {
-  return `Mission Control heartbeat. Run now: npx tsx scripts/heartbeat-orchestrator.ts --agent ${agentId}. If this fails, report via npx tsx scripts/report.ts chat Motoko "Heartbeat failed for ${agentId}".`;
+  const heartbeatCommand = buildTsxCommand("heartbeat-orchestrator.ts", ["--agent", agentId]);
+  const reportCommand = buildTsxCommand("report.ts", [
+    "chat",
+    "Motoko",
+    `HEARTBEAT_ERROR agent=${agentId} error=FULL_ERROR_OUTPUT`,
+  ]);
+  return `Mission Control heartbeat for ${agentId}. Run exactly this command now: ${heartbeatCommand}. If it fails, retry once. If it fails again, post the full error output with: ${reportCommand}.`;
 }
 
 async function main() {
@@ -90,6 +98,18 @@ async function main() {
     console.error("[cron:warn] unable to fetch existing jobs, continuing with best-effort add:", error);
   }
   const byName = new Map(jobs.map((job) => [job.name, job]));
+  const desiredNames = new Set(SCHEDULES.map((schedule) => `mc-heartbeat-${schedule.agentId}`));
+
+  for (const job of jobs) {
+    if (!job.name.startsWith(HEARTBEAT_PREFIX)) continue;
+    if (desiredNames.has(job.name)) continue;
+    try {
+      await runOpenClaw(["cron", "edit", job.id, "--disable"]);
+      console.log(`[cron:disable] ${job.name}`);
+    } catch (error) {
+      console.error(`[cron:disable:error] ${job.name}:`, error);
+    }
+  }
 
   for (const schedule of SCHEDULES) {
     const name = `mc-heartbeat-${schedule.agentId}`;

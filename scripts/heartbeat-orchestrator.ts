@@ -1,10 +1,10 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
 import os from "os";
+import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
 
-dotenv.config({ path: ".env.local" });
+loadMissionControlEnv();
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
@@ -12,6 +12,7 @@ if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.loca
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const client = new ConvexHttpClient(convexUrl);
+const reportScriptCommand = buildTsxCommand("report.ts");
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -33,7 +34,9 @@ function parseArgs() {
     }
   }
   if (!agent) {
-    throw new Error("Usage: npx tsx scripts/heartbeat-orchestrator.ts --agent <openclaw-agent-id>");
+    throw new Error(
+      `Usage: ${buildTsxCommand("heartbeat-orchestrator.ts", ["--agent", "<openclaw-agent-id>"])}`
+    );
   }
   return { agent };
 }
@@ -109,26 +112,17 @@ async function main() {
   }
 
   const prompt = [
-    `You are ${convexAgent.name} (${convexAgent.role}).`,
-    "This is your scheduled Mission Control heartbeat.",
-    "",
-    "Pending notifications:",
-    formatNotifications(pendingNotifications),
-    "",
-    "Assigned tasks:",
-    formatTasks(activeTasks),
-    "",
-    "Recent team activity:",
-    formatActivity(activities),
-    "",
-    "Execution protocol:",
-    `1) Immediately run: npx tsx scripts/report.ts heartbeat ${convexAgent.name} active "Processing heartbeat work"`,
-    "2) Work through notifications/tasks that match your role.",
-    `3) Post at least one progress update via: npx tsx scripts/report.ts chat ${convexAgent.name} "..."`,
-    `4) If you move task state, use Convex CLI (example): npx convex run tasks:updateStatus '{"id":"<taskId>","status":"in_progress"}'`,
-    `5) End with: npx tsx scripts/report.ts heartbeat ${convexAgent.name} idle "Heartbeat complete"`,
-    "If blocked, explicitly say what is missing and who is needed.",
-  ].join("\n");
+    `You are ${convexAgent.name} (${convexAgent.role}) on scheduled Mission Control heartbeat.`,
+    `Pending notifications: ${formatNotifications(pendingNotifications).replace(/\s+/g, " ").trim()}.`,
+    `Assigned tasks: ${formatTasks(activeTasks).replace(/\s+/g, " ").trim()}.`,
+    `Recent team activity: ${formatActivity(activities).replace(/\s+/g, " ").trim()}.`,
+    `Protocol: (1) ${reportScriptCommand} heartbeat ${convexAgent.name} active "Processing heartbeat work";`,
+    "(2) work relevant items;",
+    `(3) post at least one concrete update via ${reportScriptCommand} chat ${convexAgent.name} "<update>";`,
+    `if needed update tasks via Convex CLI;`,
+    `(4) finish with ${reportScriptCommand} heartbeat ${convexAgent.name} idle "Heartbeat complete".`,
+    "Do not output NO_REPLY. If blocked, state blocker and owner. If report command fails, include full error and retry once.",
+  ].join(" ");
 
   await client.mutation(api.agents.updateStatus, {
     id: convexAgent._id,

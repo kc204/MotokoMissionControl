@@ -6,11 +6,18 @@
 
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
+import { loadMissionControlEnv } from "./lib/mission-control";
 
-dotenv.config({ path: ".env.local" });
+loadMissionControlEnv();
 
-const client = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+const PROBE_LAST_REPORT_CHAT_KEY = "probe:last_report_chat_write";
+
+const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+if (!convexUrl) {
+  throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
+}
+
+const client = new ConvexHttpClient(convexUrl);
 
 async function main() {
   const [action, agentName, ...args] = process.argv.slice(2);
@@ -40,11 +47,24 @@ async function main() {
 
     case "chat": {
       const message = args.join(" ");
-      await client.mutation(api.messages.send, {
+      const messageId = await client.mutation(api.messages.send, {
         channel: "hq",
         text: message,
         agentId: agent._id,
       });
+      const now = Date.now();
+      await client.mutation(api.settings.set, {
+        key: PROBE_LAST_REPORT_CHAT_KEY,
+        value: {
+          at: now,
+          agentName,
+          messageId,
+          preview: message.slice(0, 180),
+        },
+      });
+      console.log(
+        `[report_write_confirmed] channel=hq messageId=${messageId} agent=${agentName} at=${now}`
+      );
       console.log(`Chat sent: "${message}"`);
       break;
     }

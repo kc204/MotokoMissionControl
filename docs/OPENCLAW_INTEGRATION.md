@@ -10,14 +10,19 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 - `scripts/orchestrator.ts` routes new HQ user messages to the right specialist.
 - Dispatch uses `openclaw agent --agent <id> --message "<prompt>" --json`.
 
-2. OpenClaw -> Mission Control (Reporter)
-- Agents report back by running `scripts/report.ts`.
+2. OpenClaw -> Mission Control (Event Webhook + Reporter)
+- Primary path: OpenClaw lifecycle hook posts events to Convex HTTP endpoint.
+- Endpoint: `POST /openclaw/event` (implemented in `convex/http.ts`).
+- Mutation: `openclaw.receiveEvent` maps run lifecycle -> task/message/activity updates.
+
+3. OpenClaw -> Mission Control (Reporter fallback)
+- Agents report back by running `report.ts` through an absolute path command generated from `MISSION_CONTROL_ROOT`.
 - Supported report actions:
   - `chat`
   - `heartbeat`
   - `task`
 
-3. Convex -> OpenClaw notifications (Notification daemon)
+4. Convex -> OpenClaw notifications (Notification daemon)
 - `scripts/poll-notifications.ts` polls undelivered Convex notifications.
 - It delivers to the correct OpenClaw session/agent turn.
 - Marks notifications delivered or stores retry errors.
@@ -31,6 +36,7 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 | Task | `tasks` table | agent prompt/work turn |
 | Chat | `messages` table | agent message input/output |
 | Auth profile | `authProfiles` table | `models auth order` |
+| Lifecycle | `openclaw.receiveEvent` | hook `onAgentEvent` stream |
 
 ## Bridge Scripts
 
@@ -71,6 +77,14 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
   - `researcher`: `8-59/15`
   - `monitor`: `12-59/15`
 
+7. `hooks/mission-control/handler.ts`
+- User-installed OpenClaw hook.
+- Registers `onAgentEvent` listener on gateway startup.
+- Sends lifecycle/progress events to Mission Control webhook.
+
+8. `scripts/install-openclaw-hook.ts`
+- Installs hook files into `~/.openclaw/hooks/mission-control`.
+
 ## Runbook
 
 1. Start Convex + app:
@@ -80,17 +94,32 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 2. Sync agents:
 - `npm run openclaw:sync-agents`
 
-3. Start daemons:
+3. Install hook files:
+- `npm run openclaw:install-hook`
+
+4. Configure hook env in OpenClaw config:
+- `MISSION_CONTROL_URL=https://<your-convex-site>/openclaw/event`
+- optional `MISSION_CONTROL_WEBHOOK_SECRET=<shared-secret>`
+
+5. Start daemons:
 - `npm run daemon:watcher`
 - `npm run daemon:notifications`
 
-4. Install/update heartbeat crons:
+6. Install/update heartbeat crons:
 - `npm run openclaw:setup-heartbeats`
 
-5. Smoke test:
+7. Check integration probe status:
+- `npm run stack:status`
+
+8. Smoke test:
 - Post in HQ: `@Forge status check`
 - Confirm orchestrator routing logs.
 - Confirm notification daemon delivers queue.
+- Run `openclaw agent --agent main --message "test hook"` and confirm a task is created/updated by webhook ingestion.
+
+## Environment
+
+- `MISSION_CONTROL_ROOT` (optional): absolute path to this repository. If omitted, scripts auto-resolve the repo root from script location.
 
 ## Telegram / Channel Ingress
 
@@ -106,8 +135,8 @@ For Jarvis ingress:
 
 Every orchestrated prompt instructs agents to use these commands:
 
-- `npx tsx scripts/report.ts chat <AgentName> "message"`
-- `npx tsx scripts/report.ts heartbeat <AgentName> active "working..."`
-- `npx tsx scripts/report.ts heartbeat <AgentName> idle "done"`
+- `npx tsx "<absolute-path-to-mission-control>\\scripts\\report.ts" chat <AgentName> "message"`
+- `npx tsx "<absolute-path-to-mission-control>\\scripts\\report.ts" heartbeat <AgentName> active "working..."`
+- `npx tsx "<absolute-path-to-mission-control>\\scripts\\report.ts" heartbeat <AgentName> idle "done"`
 
 This keeps Mission Control as the shared communication ledger.

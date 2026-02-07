@@ -12,27 +12,29 @@ import {
   useSensors,
   DragOverlay,
   DragStartEvent,
-  DragOverEvent,
   DragEndEvent,
 } from "@dnd-kit/core";
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-  useSortable,
-} from "@dnd-kit/sortable";
+import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 
-const COLUMNS = ["inbox", "assigned", "in_progress", "review", "done"];
+const COLUMNS = ["inbox", "assigned", "in_progress", "review", "done"] as const;
 type TaskStatus = "inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked";
-const LABELS: Record<string, string> = {
+
+const LABELS: Record<(typeof COLUMNS)[number], string> = {
   inbox: "Inbox",
-  assigned: "To Do",
+  assigned: "Assigned",
   in_progress: "In Progress",
   review: "Review",
   done: "Done",
+};
+
+const columnAccent: Record<(typeof COLUMNS)[number], string> = {
+  inbox: "from-zinc-500/20 to-zinc-500/0",
+  assigned: "from-indigo-500/20 to-indigo-500/0",
+  in_progress: "from-cyan-500/20 to-cyan-500/0",
+  review: "from-amber-500/20 to-amber-500/0",
+  done: "from-emerald-500/20 to-emerald-500/0",
 };
 
 interface Task {
@@ -43,14 +45,18 @@ interface Task {
   priority: "low" | "medium" | "high" | "urgent";
 }
 
-function SortableItem({ task }: { task: Task }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-  } = useSortable({ id: task._id, data: { ...task } });
+function priorityClass(priority: Task["priority"]) {
+  if (priority === "urgent") return "border-red-500/40 bg-red-500/15 text-red-200";
+  if (priority === "high") return "border-amber-500/40 bg-amber-500/15 text-amber-100";
+  if (priority === "medium") return "border-blue-500/40 bg-blue-500/15 text-blue-200";
+  return "border-zinc-500/40 bg-zinc-500/15 text-zinc-300";
+}
+
+function TaskCard({ task }: { task: Task }) {
+  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
+    id: task._id,
+    data: { ...task },
+  });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -63,22 +69,19 @@ function SortableItem({ task }: { task: Task }) {
       style={style}
       {...attributes}
       {...listeners}
-      className="p-4 bg-black/40 rounded-xl border border-white/5 hover:border-white/10 transition-colors cursor-grab active:cursor-grabbing group mb-3"
+      className="mb-3 cursor-grab rounded-xl border border-white/10 bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-3.5 transition-colors hover:border-white/20 active:cursor-grabbing"
     >
-      <div className="flex justify-between items-start mb-2">
-        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
-          task.priority === 'urgent' ? 'bg-red-500/10 text-red-400 border-red-500/20' :
-          task.priority === 'high' ? 'bg-orange-500/10 text-orange-400 border-orange-500/20' :
-          'bg-blue-500/10 text-blue-400 border-blue-500/20'
-        } uppercase font-medium`}>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span
+          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${priorityClass(task.priority)}`}
+        >
           {task.priority}
         </span>
+        <span className="font-mono text-[10px] text-zinc-600">#{task._id.slice(-4)}</span>
       </div>
-      <h4 className="font-medium text-zinc-200 text-sm leading-snug mb-1 group-hover:text-white">
-        {task.title}
-      </h4>
-      <p className="text-xs text-zinc-500 line-clamp-2">
-        {task.description}
+      <h4 className="line-clamp-2 text-sm font-semibold leading-tight text-zinc-100">{task.title}</h4>
+      <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-400">
+        {task.description || "No description"}
       </p>
     </div>
   );
@@ -96,81 +99,56 @@ export default function KanbanBoard() {
     })
   );
 
-  const activeTask = useMemo(
-    () => tasks.find((t) => t._id === activeId),
-    [activeId, tasks]
-  );
+  const activeTask = useMemo(() => tasks.find((t) => t._id === activeId), [activeId, tasks]);
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveId(event.active.id as Id<"tasks">);
   };
 
-  const handleDragOver = (event: DragOverEvent) => {
-    // Optional: Add visual feedback for dropping into column
-  };
-
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
-
     if (!over) return;
-
-    // Check if dropped on a column container (which has ID = status)
-    if (COLUMNS.includes(over.id as string)) {
+    if (COLUMNS.includes(over.id as (typeof COLUMNS)[number])) {
       const newStatus = over.id as TaskStatus;
       const taskId = active.id as Id<"tasks">;
-      
-      // Update local state optimistic UI could go here, but convex is fast enough
       await updateStatus({ id: taskId, status: newStatus });
     }
   };
 
   return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCorners}
-      onDragStart={handleDragStart}
-      onDragOver={handleDragOver}
-      onDragEnd={handleDragEnd}
-    >
-      <div className="h-full overflow-x-auto">
-        <div className="flex gap-6 h-full min-w-max pb-4">
+    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <div className="overflow-x-auto">
+        <div className="flex min-w-max gap-5 pb-4">
           {COLUMNS.map((status) => {
             const columnTasks = tasks.filter((t) => t.status === status);
-            
             return (
-              <div key={status} className="w-80 flex flex-col h-full">
-                {/* Column Header */}
-                <div className="flex items-center justify-between p-1 mb-2">
-                  <h3 className="font-bold text-zinc-400 uppercase tracking-wider text-sm">
+              <section key={status} className="w-[310px]">
+                <header className="mb-2 flex items-center justify-between px-1">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
                     {LABELS[status]}
                   </h3>
-                  <span className="bg-white/10 text-zinc-500 text-xs px-2 py-0.5 rounded-full font-mono">
+                  <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-xs text-zinc-400">
                     {columnTasks.length}
                   </span>
-                </div>
+                </header>
 
-                {/* Droppable Area */}
-                <SortableContext
-                  id={status}
-                  items={columnTasks.map((t) => t._id)}
-                  strategy={verticalListSortingStrategy}
-                >
-                  <div 
-                    id={status} // This ID is crucial for detecting drop on column
-                    className="flex-1 bg-white/5 rounded-2xl border border-white/5 p-3 overflow-y-auto"
+                <SortableContext id={status} items={columnTasks.map((t) => t._id)} strategy={verticalListSortingStrategy}>
+                  <div
+                    id={status}
+                    className={`relative min-h-[62vh] overflow-y-auto rounded-2xl border border-white/10 bg-gradient-to-b p-3 ${columnAccent[status]}`}
                   >
-                    {columnTasks.map((task) => (
-                      <SortableItem key={task._id} task={task} />
-                    ))}
                     {columnTasks.length === 0 && (
-                      <div className="h-24 flex items-center justify-center border-2 border-dashed border-white/5 rounded-xl pointer-events-none">
-                        <p className="text-xs text-zinc-600">Drop here</p>
+                      <div className="flex h-28 items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20">
+                        <p className="text-xs uppercase tracking-wider text-zinc-600">Drop Tasks Here</p>
                       </div>
                     )}
+                    {columnTasks.map((task) => (
+                      <TaskCard key={task._id} task={task} />
+                    ))}
                   </div>
                 </SortableContext>
-              </div>
+              </section>
             );
           })}
         </div>
@@ -178,16 +156,12 @@ export default function KanbanBoard() {
 
       <DragOverlay>
         {activeTask ? (
-           <div className="p-4 bg-black/80 rounded-xl border border-blue-500/50 shadow-2xl w-80 cursor-grabbing backdrop-blur-xl">
-             <div className="flex justify-between items-start mb-2">
-               <span className="text-[10px] px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/20 uppercase font-medium">
-                 {activeTask.priority}
-               </span>
-             </div>
-             <h4 className="font-medium text-white text-sm leading-snug mb-1">
-               {activeTask.title}
-             </h4>
-           </div>
+          <div className="w-[310px] rounded-xl border border-cyan-400/35 bg-black/85 p-3.5 shadow-2xl backdrop-blur-xl">
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${priorityClass(activeTask.priority)}`}>
+              {activeTask.priority}
+            </span>
+            <h4 className="mt-2 text-sm font-semibold text-zinc-100">{activeTask.title}</h4>
+          </div>
         ) : null}
       </DragOverlay>
     </DndContext>

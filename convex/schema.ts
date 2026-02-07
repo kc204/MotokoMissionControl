@@ -53,11 +53,18 @@ export default defineSchema({
     projectId: v.optional(v.id("projects")),
     assigneeIds: v.array(v.id("agents")),
     createdBy: v.string(),
+    sessionKey: v.optional(v.string()),
+    openclawRunId: v.optional(v.string()),
+    source: v.optional(v.string()),
+    startedAt: v.optional(v.number()),
+    lastEventAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
     completedAt: v.optional(v.number()),
   })
     .index("by_status", ["status"])
+    .index("by_openclawRunId", ["openclawRunId"])
+    .index("by_sessionKey", ["sessionKey"])
     .index("by_createdAt", ["createdAt"])
     .index("by_projectId", ["projectId"]),
   messages: defineTable({

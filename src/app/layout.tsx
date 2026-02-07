@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import ConvexClientProvider from "./ConvexClientProvider";
-import Sidebar from "@/components/Sidebar";
+import TopNav from "@/components/TopNav";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const displaySans = Space_Grotesk({
+  variable: "--font-display-sans",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const mono = JetBrains_Mono({
+  variable: "--font-code-mono",
   subsets: ["latin"],
 });
 
@@ -27,12 +27,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black text-white`}
+        className={`${displaySans.variable} ${mono.variable} antialiased`}
       >
         <ConvexClientProvider>
-          <div className="flex min-h-screen">
-            <Sidebar />
-            <div className="flex-1 ml-64 p-8">
+          <div className="min-h-screen">
+            <TopNav />
+            <div className="mx-auto w-full max-w-[1600px] px-4 pb-8 pt-20 sm:px-6 lg:px-8">
               {children}
             </div>
           </div>

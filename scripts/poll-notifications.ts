@@ -1,10 +1,10 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
 import os from "os";
+import { loadMissionControlEnv } from "./lib/mission-control";
 
-dotenv.config({ path: ".env.local" });
+loadMissionControlEnv();
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) {
