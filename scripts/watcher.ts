@@ -58,6 +58,32 @@ async function runOpenClaw(args: string[]): Promise<void> {
   });
 }
 
+async function runOpenClawJson<T>(args: string[]): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const child = spawnOpenClaw(args);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `openclaw exited with code ${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as T);
+      } catch {
+        reject(new Error(`Failed to parse JSON from openclaw: ${stdout || stderr}`));
+      }
+    });
+  });
+}
+
 function agentIdFromSessionKey(sessionKey: string): string {
   const parts = sessionKey.split(":");
   if (parts.length >= 2 && parts[0] === "agent") return parts[1];
@@ -65,18 +91,45 @@ function agentIdFromSessionKey(sessionKey: string): string {
 }
 
 async function syncModels() {
+  const configAgents = await runOpenClawJson<Array<{ id?: string }>>([
+    "config",
+    "get",
+    "agents.list",
+    "--json",
+  ]).catch(() => []);
+  const configList = Array.isArray(configAgents) ? configAgents : [];
+  const modelPathByAgentId = new Map<string, string>();
+  for (let i = 0; i < configList.length; i += 1) {
+    const id = configList[i]?.id;
+    if (typeof id !== "string" || !id) continue;
+    modelPathByAgentId.set(id, `agents.list[${i}].model`);
+  }
+
   const agents = await client.query(api.agents.list);
   for (const agent of agents) {
-    const key = agent.name;
+    const key = agent.sessionKey;
     const desired = agent.models.thinking;
     const lastKnown = modelCache.get(key);
     if (lastKnown === desired) continue;
 
     const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
+    const modelPath = modelPathByAgentId.get(openclawAgentId);
+    let configPersisted = false;
+
     try {
+      if (modelPath) {
+        await runOpenClaw(["config", "set", modelPath, desired]);
+        configPersisted = true;
+      } else {
+        console.warn(`[model] config path missing for ${agent.name} (${openclawAgentId}), applying runtime only`);
+      }
+
+      // Also apply through models command for immediate runtime alignment.
       await runOpenClaw(["models", "--agent", openclawAgentId, "set", desired]);
       modelCache.set(key, desired);
-      console.log(`[model] ${agent.name} -> ${desired}`);
+      console.log(
+        `[model] ${agent.name} (${openclawAgentId}) -> ${desired} persisted=${configPersisted}`
+      );
     } catch (error) {
       console.error(`[model] failed for ${agent.name}:`, error);
     }
