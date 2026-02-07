@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
+import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
 import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
 
@@ -129,25 +130,37 @@ async function runOpenClawAgent(agentId: string, prompt: string): Promise<OpenCl
   });
 }
 
-async function runOpenClawAgentWithRetry(agentId: string, prompt: string): Promise<OpenClawRunResult> {
-  try {
-    return await runOpenClawAgent(agentId, prompt);
-  } catch (firstError) {
-    const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
-    console.error(`[dispatch_retry] agent=${agentId} reason=${firstErrorMessage}`);
-    return await runOpenClawAgent(agentId, prompt);
-  }
-}
-
-async function getLatestAgentMessageInChannel(channel: string, agentId: string) {
+async function getLatestAgentMessageInChannel(channel: string, agentId: Id<"agents">) {
   const messages = await client.query(api.messages.list, { channel });
   const own = messages.filter((m) => m.agentId === agentId);
   return own.length === 0 ? null : own[own.length - 1];
 }
 
+async function waitForAgentReply(args: {
+  channel: string;
+  agentDbId: Id<"agents">;
+  beforeMessageId: string | null;
+  timeoutMs?: number;
+  intervalMs?: number;
+}) {
+  const timeoutMs = args.timeoutMs ?? 3000;
+  const intervalMs = args.intervalMs ?? 300;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const latest = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
+    if (latest && latest._id !== args.beforeMessageId) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+}
+
 async function persistFallbackHqMessage(args: {
   channel: string;
-  agentDbId: string;
+  agentDbId: Id<"agents">;
   agentName: string;
   assistantText: string;
 }) {
@@ -155,7 +168,7 @@ async function persistFallbackHqMessage(args: {
   const messageId = await client.mutation(api.messages.send, {
     channel: args.channel,
     text: fallbackText,
-    agentId: args.agentDbId as any,
+    agentId: args.agentDbId,
   });
   const now = Date.now();
   await client.mutation(api.settings.set, {
@@ -175,26 +188,53 @@ async function persistFallbackHqMessage(args: {
 
 async function ensureHqReplyPersisted(args: {
   channel: string;
-  agentDbId: string;
+  agentDbId: Id<"agents">;
   agentName: string;
   beforeMessageId: string | null;
   assistantText: string;
 }) {
-  const afterMessage = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
-  const noNewMessage = !afterMessage || afterMessage._id === args.beforeMessageId;
-  if (!noNewMessage) return;
+  const hasReply = await waitForAgentReply({
+    channel: args.channel,
+    agentDbId: args.agentDbId,
+    beforeMessageId: args.beforeMessageId,
+    timeoutMs: 4000,
+    intervalMs: 400,
+  });
+  if (hasReply) return;
   await persistFallbackHqMessage(args);
 }
 
 async function runOpenClawAndEnsureReply(args: {
   channel: string;
-  agentDbId: string;
+  agentDbId: Id<"agents">;
   agentName: string;
   agentRuntimeId: string;
   prompt: string;
 }) {
   const before = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
-  const result = await runOpenClawAgentWithRetry(args.agentRuntimeId, args.prompt);
+  let result: OpenClawRunResult;
+  try {
+    result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
+  } catch (firstError) {
+    const hasReply = await waitForAgentReply({
+      channel: args.channel,
+      agentDbId: args.agentDbId,
+      beforeMessageId: before?._id ?? null,
+      timeoutMs: 3000,
+      intervalMs: 300,
+    });
+    if (hasReply) {
+      const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
+      console.warn(
+        `[dispatch_retry_skip] agent=${args.agentRuntimeId} reason=${firstErrorMessage} reply=already_persisted`
+      );
+      return;
+    }
+    const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
+    console.error(`[dispatch_retry] agent=${args.agentRuntimeId} reason=${firstErrorMessage}`);
+    result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
+  }
+
   await ensureHqReplyPersisted({
     channel: args.channel,
     agentDbId: args.agentDbId,
