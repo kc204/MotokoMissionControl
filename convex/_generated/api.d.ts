@@ -10,6 +10,7 @@
 
 import type * as activities from "../activities.js";
 import type * as agents from "../agents.js";
+import type * as auth from "../auth.js";
 import type * as documents from "../documents.js";
 import type * as messages from "../messages.js";
 import type * as models from "../models.js";
@@ -30,6 +31,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   activities: typeof activities;
   agents: typeof agents;
+  auth: typeof auth;
   documents: typeof documents;
   messages: typeof messages;
   models: typeof models;

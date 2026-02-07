@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import AuthSwitcher from "./AuthSwitcher";
 
 const navigation = [
   { name: "Agents", href: "/", icon: "🤖" },
@@ -40,8 +41,10 @@ export default function Sidebar() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-white/10">
-        <div className="flex items-center gap-3 px-4 py-3">
+      <div className="p-4 border-t border-white/10 space-y-4">
+        <AuthSwitcher />
+        
+        <div className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-xl border border-white/5">
           <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-xs font-mono text-zinc-500">SYSTEM ONLINE</span>
         </div>

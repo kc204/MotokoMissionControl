@@ -8,13 +8,8 @@ Run these in separate terminals:
 
 1. `npx convex dev`
 2. `npm run dev`
-3. `npm run daemon:notifications`
-
-Optional local simulation loop:
-
-4. `npm run daemon:hivemind`
-
-`daemon:hivemind` is a local simulation brain, not your final OpenClaw workflow.
+3. `npm run daemon:watcher`
+4. `npm run daemon:notifications`
 
 ## 1) Verify OpenClaw is healthy
 
@@ -91,16 +86,13 @@ This behavior is implemented in:
 
 ## 6) Heartbeats (every 15 minutes)
 
-Add OpenClaw cron per specialist (staggered):
+Install/update staggered heartbeat crons:
 
-- `openclaw cron add --name "mc-main-heartbeat" --cron "*/15 * * * *" --session "isolated" --message "You are Jarvis. Check Mission Control notifications, assigned tasks, and activity feed. If nothing, reply HEARTBEAT_OK."`
-
-Repeat with offsets for each specialist (`2-59/15`, `4-59/15`, etc.) and domain-specific role text.
+- `npm run openclaw:setup-heartbeats`
 
 ## 7) Known constraints in current repo
 
-- `scripts/watcher.ts` still has config-sync commands commented out (model switching not active).
-- `daemon:hivemind` uses Google API directly; this is separate from OpenClaw orchestration.
+- `scripts/watcher.ts` updates model/auth settings and invokes orchestrator; keep it running.
 - Real Telegram -> Jarvis ingestion is outside this repo and must be configured in OpenClaw channel routing.
 
 ## 8) Environment variables
@@ -118,4 +110,4 @@ Recommended:
 
 Optional (for local simulation only):
 
-- `GOOGLE_API_KEY` (used by `daemon:hivemind`)
+- `GOOGLE_API_KEY` (only needed if you still run local simulation scripts)

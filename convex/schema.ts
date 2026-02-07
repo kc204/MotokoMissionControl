@@ -163,4 +163,10 @@ export default defineSchema({
     .index("by_taskId", ["taskId"])
     .index("by_agentId", ["agentId"])
     .index("by_taskId_agentId", ["taskId", "agentId"]),
+  authProfiles: defineTable({
+    email: v.string(),
+    provider: v.string(),
+    isActive: v.boolean(),
+    profileId: v.string(), // e.g. "google-antigravity:kaceynwadike@gmail.com"
+  }).index("by_isActive", ["isActive"]),
 });
