@@ -15,7 +15,7 @@ if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.loca
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const POLL_MS = Number(process.env.WATCHER_POLL_MS || 1000);
-const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 60000);
+const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 5000);
 const AUTH_PROFILE_DISCOVERY_MS = Number(process.env.WATCHER_AUTH_PROFILE_DISCOVERY_MS || 15000);
 const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
 const WATCHER_LEASE_KEY = "watcher:leader";
@@ -36,7 +36,7 @@ const watcherInstanceId = `${os.hostname()}:${process.pid}`;
 
 const client = new ConvexHttpClient(convexUrl);
 const modelCache = new Map<string, string>();
-let activeAuthProfile: string | null = null;
+const authProfileCacheByAgent = new Map<string, string>();
 let orchestratorBusy = false;
 let isLeader = false;
 let lastLeaseCheckAt = 0;
@@ -226,6 +226,11 @@ type OpenClawAuthFile = {
   profiles?: Record<string, OpenClawAuthProfileValue>;
 };
 
+type ActiveAuthProfile = {
+  provider: string;
+  profileId: string;
+};
+
 type DispatchThreadMessage = {
   fromUser: boolean;
   text: string;
@@ -241,6 +246,7 @@ type ClaimedTaskDispatch = {
   targetAgentId: Id<"agents">;
   targetAgentName: string;
   targetSessionKey: string;
+  targetThinkingModel: string;
   targetAgentLevel: "LEAD" | "INT" | "SPC";
   targetAgentRole: string;
   targetAgentSystemPrompt: string;
@@ -312,13 +318,19 @@ async function syncAuthProfile() {
     return;
   }
 
-  const syncKey = `${provider}:${active.profileId}`;
-  if (syncKey === activeAuthProfile) return;
-
   const agents = await client.query(api.agents.list);
-  const results = await Promise.allSettled(
-    agents.map(async (agent) => {
-      const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
+  const syncKey = `${provider}:${active.profileId}`;
+  let successCount = 0;
+  let attemptedCount = 0;
+
+  for (const agent of agents) {
+    const runtimeAgentId = agentIdFromSessionKey(agent.sessionKey);
+    if (authProfileCacheByAgent.get(runtimeAgentId) === syncKey) {
+      continue;
+    }
+
+    attemptedCount += 1;
+    try {
       await runOpenClaw([
         "models",
         "auth",
@@ -327,35 +339,52 @@ async function syncAuthProfile() {
         "--provider",
         provider,
         "--agent",
-        openclawAgentId,
+        runtimeAgentId,
         active.profileId,
       ]);
-      return agent.name;
-    })
-  );
-
-  let successCount = 0;
-  for (let i = 0; i < results.length; i += 1) {
-    const result = results[i];
-    if (result.status === "fulfilled") {
+      authProfileCacheByAgent.set(runtimeAgentId, syncKey);
       successCount += 1;
-      continue;
+    } catch (error) {
+      authProfileCacheByAgent.delete(runtimeAgentId);
+      console.error(`[auth] failed for ${agent.name}:`, error);
     }
-    const agentName = agents[i]?.name ?? "unknown";
-    console.error(`[auth] failed for ${agentName}:`, result.reason);
   }
 
-  if (successCount > 0) {
-    activeAuthProfile = syncKey;
+  if (attemptedCount > 0) {
     console.log(
-      `[auth] active profile set to ${active.profileId} provider=${provider} syncedAgents=${successCount}/${agents.length}`
+      `[auth] active profile ${active.profileId} provider=${provider} synced=${successCount}/${attemptedCount} (remaining retry=${attemptedCount - successCount})`
     );
-    return;
   }
+}
 
-  console.error(
-    `[auth] no agent auth orders updated for profile ${active.profileId} provider=${provider}`
-  );
+async function getActiveAuthProfile(): Promise<ActiveAuthProfile | null> {
+  const active = await client.query(api.auth.getActive);
+  if (!active) return null;
+  const provider =
+    (typeof active.provider === "string" && active.provider) ||
+    active.profileId.split(":")[0] ||
+    "";
+  if (!provider) return null;
+  return { provider, profileId: active.profileId };
+}
+
+async function ensureAgentAuthOrder(runtimeAgentId: string, auth: ActiveAuthProfile | null) {
+  if (!auth) return;
+  const syncKey = `${auth.provider}:${auth.profileId}`;
+  if (authProfileCacheByAgent.get(runtimeAgentId) === syncKey) return;
+
+  await runOpenClaw([
+    "models",
+    "auth",
+    "order",
+    "set",
+    "--provider",
+    auth.provider,
+    "--agent",
+    runtimeAgentId,
+    auth.profileId,
+  ]);
+  authProfileCacheByAgent.set(runtimeAgentId, syncKey);
 }
 
 function extractAssistantText(payload: unknown): string {
@@ -452,6 +481,13 @@ async function processTaskDispatchQueue() {
   );
 
   try {
+    const activeAuthProfile = await getActiveAuthProfile();
+    await ensureAgentAuthOrder(runtimeAgentId, activeAuthProfile);
+
+    // Enforce the selected model immediately for this agent before dispatch.
+    await runOpenClaw(["models", "--agent", runtimeAgentId, "set", dispatch.targetThinkingModel]);
+    modelCache.set(dispatch.targetSessionKey, dispatch.targetThinkingModel);
+
     const result = await runOpenClawJson<unknown>([
       "agent",
       "--agent",

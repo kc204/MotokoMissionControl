@@ -101,6 +101,54 @@ function extractAssistantText(payload: unknown): string {
   return parts.join("\n\n").trim();
 }
 
+async function getActiveAuthProfile() {
+  const active = await client.query(api.auth.getActive);
+  if (!active) return null;
+  const provider =
+    (typeof active.provider === "string" && active.provider) ||
+    active.profileId.split(":")[0] ||
+    "";
+  if (!provider) return null;
+  return { provider, profileId: active.profileId };
+}
+
+async function ensureAgentRuntimeConfig(agentRuntimeId: string, thinkingModel: string) {
+  const activeAuth = await getActiveAuthProfile();
+  if (activeAuth) {
+    await runOpenClawAgentCommand([
+      "models",
+      "auth",
+      "order",
+      "set",
+      "--provider",
+      activeAuth.provider,
+      "--agent",
+      agentRuntimeId,
+      activeAuth.profileId,
+    ]);
+  }
+
+  await runOpenClawAgentCommand(["models", "--agent", agentRuntimeId, "set", thinkingModel]);
+}
+
+async function runOpenClawAgentCommand(args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawnOpenClaw(args);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr || `openclaw exited with code ${code}`));
+    });
+  });
+}
+
 async function runOpenClawAgent(agentId: string, prompt: string): Promise<OpenClawRunResult> {
   return await new Promise<OpenClawRunResult>((resolve, reject) => {
     const args = ["agent", "--agent", agentId, "--message", prompt, "--json"];
@@ -209,8 +257,11 @@ async function runOpenClawAndEnsureReply(args: {
   agentDbId: Id<"agents">;
   agentName: string;
   agentRuntimeId: string;
+  thinkingModel: string;
   prompt: string;
 }) {
+  await ensureAgentRuntimeConfig(args.agentRuntimeId, args.thinkingModel);
+
   const before = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
   let result: OpenClawRunResult;
   try {
@@ -308,6 +359,7 @@ async function main() {
         agentDbId: target._id,
         agentName: target.name,
         agentRuntimeId: targetAgentId,
+        thinkingModel: target.models.thinking,
         prompt,
       });
       const completedAt = Date.now();
