@@ -69,6 +69,28 @@ type AuthProfileCandidate = {
 
 function extractModelIds(payload: unknown) {
   const out = new Set<string>();
+  const parsed = payload as
+    | {
+        models?: Array<{
+          key?: string;
+          available?: boolean | null;
+          missing?: boolean | null;
+        }>;
+      }
+    | undefined;
+
+  if (Array.isArray(parsed?.models)) {
+    for (const model of parsed.models) {
+      const key = typeof model?.key === "string" ? model.key.trim() : "";
+      if (!key) continue;
+      const isAvailable = model?.available === true;
+      const isMissing = model?.missing === true;
+      if (!isAvailable || isMissing) continue;
+      out.add(key);
+    }
+    return out;
+  }
+
   const visit = (value: unknown) => {
     if (typeof value === "string") {
       const trimmed = value.trim();
@@ -163,6 +185,15 @@ function isQuotaLikeError(message: string) {
     lower.includes("capacity") ||
     lower.includes("rate limit") ||
     lower.includes("exhausted")
+  );
+}
+
+function isModelResolutionError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("unknown model") ||
+    lower.includes("specified without provider") ||
+    lower.includes("model not found")
   );
 }
 
@@ -676,7 +707,11 @@ async function runOpenClawAndEnsureReply(args: {
       }
 
       lastError = error instanceof Error ? error : new Error(errorMessage);
-      if (ORCHESTRATOR_FAILOVER_ENABLED && isQuotaLikeError(errorMessage) && hasMoreAttempts) {
+      if (
+        ORCHESTRATOR_FAILOVER_ENABLED &&
+        (isQuotaLikeError(errorMessage) || isModelResolutionError(errorMessage)) &&
+        hasMoreAttempts
+      ) {
         console.warn(
           `[dispatch_failover] agent=${args.agentRuntimeId} model=${attempt.model} auth=${
             attempt.auth?.profileId ?? "-"

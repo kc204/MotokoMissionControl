@@ -71,6 +71,12 @@ export default function AgentStudioPanel() {
   const [draft, setDraft] = useState<AgentDraft>(DEFAULT_DRAFT);
   const [statusText, setStatusText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const modelOptions = useMemo(() => {
+    if (draft.thinkingModel && !models.some((m) => m.id === draft.thinkingModel)) {
+      return [{ id: draft.thinkingModel, name: draft.thinkingModel }, ...models];
+    }
+    return models;
+  }, [draft.thinkingModel, models]);
 
   useEffect(() => {
     if (selectedAgent === "new") return;
@@ -264,12 +270,15 @@ export default function AgentStudioPanel() {
                 onChange={(e) => setDraft((prev) => ({ ...prev, thinkingModel: e.target.value }))}
                 className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
               >
-                {models.map((model) => (
+                {modelOptions.map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.name}
                   </option>
                 ))}
               </select>
+              {models.length === 0 ? (
+                <p className="mt-1 text-[11px] text-amber-300/80">No runtime models found yet. Start watcher and retry.</p>
+              ) : null}
             </label>
           </div>
 
@@ -342,4 +351,3 @@ export default function AgentStudioPanel() {
     </section>
   );
 }
-

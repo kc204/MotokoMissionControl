@@ -1,18 +1,31 @@
 import { query } from "./_generated/server";
 
+const OPENCLAW_AVAILABLE_MODELS_KEY = "openclaw:models:available";
+
+function parseAvailableModels(value: unknown): Array<{ id: string; name: string }> {
+  if (!value || typeof value !== "object") return [];
+  const raw = value as { models?: unknown };
+  if (!Array.isArray(raw.models)) return [];
+
+  const models: Array<{ id: string; name: string }> = [];
+  for (const entry of raw.models) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry as { id?: unknown; name?: unknown };
+    const id = typeof rec.id === "string" ? rec.id.trim() : "";
+    if (!id) continue;
+    const name = typeof rec.name === "string" ? rec.name.trim() : "";
+    models.push({ id, name: name || id });
+  }
+  return models.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export const list = query({
   args: {},
-  handler: async () => {
-    return [
-      { id: "google-antigravity/claude-opus-4-5-thinking", name: "Claude Opus 4.5 (Antigravity)" },
-      { id: "google-antigravity/claude-sonnet-4-5", name: "Claude Sonnet 4.5 (Antigravity)" },
-      { id: "google-antigravity/gemini-3-pro-high", name: "Gemini 3 Pro High (Antigravity)" },
-      { id: "google-antigravity/gemini-3-flash", name: "Gemini 3 Flash (Antigravity)" },
-      { id: "google-antigravity/nano-banana-pro", name: "Nano Banana Pro (Images)" },
-      { id: "codex-cli", name: "codex-cli (CLI)" },
-      { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-      { id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-      { id: "kimi-code/kimi-for-coding", name: "Kimi Code" },
-    ];
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("settings")
+      .withIndex("by_key", (q) => q.eq("key", OPENCLAW_AVAILABLE_MODELS_KEY))
+      .first();
+    return parseAvailableModels(row?.value);
   },
 });

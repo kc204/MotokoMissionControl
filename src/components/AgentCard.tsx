@@ -41,6 +41,9 @@ export default function AgentCard({
   const [isEditing, setIsEditing] = useState(false);
   const normalizedThinkingModel =
     models.thinking === "anthropic/codex-cli" ? "codex-cli" : models.thinking;
+  const selectableModels = availableModels.some((m) => m.id === normalizedThinkingModel)
+    ? availableModels
+    : [{ id: normalizedThinkingModel, name: normalizedThinkingModel }, ...availableModels];
 
   const currentModelName =
     availableModels.find((m) => m.id === normalizedThinkingModel)?.name || models.thinking;
@@ -75,8 +78,9 @@ export default function AgentCard({
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Brain Model</p>
             <button
+              disabled={availableModels.length === 0}
               onClick={() => setIsEditing((s) => !s)}
-              className="text-xs text-zinc-500 transition-colors hover:text-zinc-200"
+              className="text-xs text-zinc-500 transition-colors hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {isEditing ? "Done" : "Change"}
             </button>
@@ -87,7 +91,7 @@ export default function AgentCard({
               onChange={(e) => handleModelChange(e.target.value)}
               className="w-full rounded-lg border border-white/15 bg-black/40 px-2 py-2 text-sm text-zinc-200 focus:border-cyan-400/40 focus:outline-none"
             >
-              {availableModels.map((m) => (
+              {selectableModels.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
                 </option>
@@ -101,6 +105,9 @@ export default function AgentCard({
               {currentModelName}
             </p>
           )}
+          {availableModels.length === 0 ? (
+            <p className="mt-2 text-[11px] text-amber-300/80">No runtime models found yet. Start watcher and retry.</p>
+          ) : null}
         </div>
 
         <div>

@@ -1,8 +1,10 @@
 import { query, mutation } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 
 const agentStatus = v.union(v.literal("idle"), v.literal("active"), v.literal("blocked"));
 const agentLevel = v.union(v.literal("LEAD"), v.literal("INT"), v.literal("SPC"));
+const OPENCLAW_AVAILABLE_MODELS_KEY = "openclaw:models:available";
 
 function inferLevelFromRole(role: string) {
   const normalized = role.toLowerCase();
@@ -16,6 +18,41 @@ function normalizeModelName(modelName?: string) {
   const trimmed = modelName.trim();
   if (trimmed === "anthropic/codex-cli") return "codex-cli";
   return trimmed;
+}
+
+function parseAvailableModelIds(value: unknown) {
+  if (!value || typeof value !== "object") return new Set<string>();
+  const raw = value as { models?: unknown };
+  if (!Array.isArray(raw.models)) return new Set<string>();
+  const ids = new Set<string>();
+  for (const item of raw.models) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { id?: unknown };
+    const id = typeof rec.id === "string" ? rec.id.trim() : "";
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+function isModelIdInCatalog(modelId: string, catalog: Set<string>) {
+  if (!modelId || catalog.size === 0) return true;
+  if (catalog.has(modelId)) return true;
+  for (const id of catalog) {
+    if (id.endsWith(`/${modelId}`)) return true;
+  }
+  return false;
+}
+
+async function assertModelAvailable(ctx: MutationCtx, modelId: string) {
+  const normalized = normalizeModelName(modelId) ?? modelId;
+  const row = await ctx.db
+    .query("settings")
+    .withIndex("by_key", (q) => q.eq("key", OPENCLAW_AVAILABLE_MODELS_KEY))
+    .first();
+  const catalog = parseAvailableModelIds(row?.value);
+  if (catalog.size > 0 && !isModelIdInCatalog(normalized, catalog)) {
+    throw new Error(`Model not available in OpenClaw runtime: ${normalized}`);
+  }
 }
 
 function slugifyAgentId(input: string) {
@@ -104,6 +141,13 @@ export const createAgent = mutation({
     while (usedRuntimeIds.has(runtimeId)) {
       runtimeId = `${requestedId}-${suffix}`;
       suffix += 1;
+    }
+
+    if (args.thinkingModel) {
+      await assertModelAvailable(ctx, args.thinkingModel);
+    }
+    if (args.fallbackModel) {
+      await assertModelAvailable(ctx, args.fallbackModel);
     }
 
     const now = Date.now();
@@ -305,6 +349,8 @@ export const updateModel = mutation({
   handler: async (ctx, args) => {
     const agent = await ctx.db.get(args.id);
     if (!agent) throw new Error("Agent not found");
+
+    await assertModelAvailable(ctx, args.modelName);
 
     const models = {
       ...agent.models,

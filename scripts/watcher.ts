@@ -36,6 +36,7 @@ const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const WATCHER_MESSAGE_RETRY_STATE_KEY = "watcher:message_retry_state";
 const WATCHER_MESSAGE_DEAD_LETTER_KEY = "watcher:message_dead_letters";
+const OPENCLAW_AVAILABLE_MODELS_KEY = "openclaw:models:available";
 const WATCHER_MESSAGE_MAX_RETRIES = Math.max(1, Number(process.env.WATCHER_MESSAGE_MAX_RETRIES || 3));
 const WATCHER_MESSAGE_RETRY_STATE_LIMIT = Math.max(
   50,
@@ -91,6 +92,7 @@ let deadLettersByMessageId: Record<
 > = {};
 let availableModelIds = new Set<string>();
 let hasLoadedModelCatalog = false;
+let lastModelCatalogSignature = "";
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -287,40 +289,55 @@ function isPermanentDispatchError(message: string) {
   );
 }
 
-function extractModelIds(payload: unknown) {
-  const out = new Set<string>();
-  const visit = (value: unknown) => {
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (!trimmed) return;
-      // Model identifiers in OpenClaw are usually "provider/model" or alias-like ids.
-      if (trimmed.includes("/") || /^[a-z0-9._-]+$/i.test(trimmed)) {
-        out.add(trimmed);
+function isModelResolutionError(message: string) {
+  return isPermanentDispatchError(message);
+}
+
+function extractAvailableModels(payload: unknown) {
+  const parsed = payload as
+    | {
+        models?: Array<{
+          key?: string;
+          name?: string;
+          available?: boolean | null;
+          missing?: boolean | null;
+        }>;
       }
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
-    const obj = value as Record<string, unknown>;
-    if (typeof obj.id === "string") out.add(obj.id.trim());
-    if (typeof obj.model === "string") out.add(obj.model.trim());
-    if (typeof obj.name === "string" && obj.name.includes("/")) out.add(obj.name.trim());
-    for (const nested of Object.values(obj)) visit(nested);
-  };
-  visit(payload);
-  return out;
+    | undefined;
+
+  if (!Array.isArray(parsed?.models)) return [];
+
+  const map = new Map<string, { id: string; name: string }>();
+  for (const model of parsed.models) {
+    const id = typeof model?.key === "string" ? model.key.trim() : "";
+    if (!id) continue;
+    const isAvailable = model?.available === true;
+    const isMissing = model?.missing === true;
+    if (!isAvailable || isMissing) continue;
+    const rawName = typeof model?.name === "string" ? model.name.trim() : "";
+    map.set(id, { id, name: rawName || id });
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function refreshModelCatalog() {
   try {
     const raw = await runOpenClawJson<unknown>(["models", "list", "--json"]);
-    const next = extractModelIds(raw);
-    if (next.size > 0) {
-      availableModelIds = next;
+    const next = extractAvailableModels(raw);
+    if (next.length > 0) {
+      availableModelIds = new Set(next.map((model) => model.id));
       hasLoadedModelCatalog = true;
+      const signature = JSON.stringify(next);
+      if (signature !== lastModelCatalogSignature) {
+        await client.mutation(api.settings.set, {
+          key: OPENCLAW_AVAILABLE_MODELS_KEY,
+          value: {
+            updatedAt: Date.now(),
+            models: next,
+          },
+        });
+        lastModelCatalogSignature = signature;
+      }
     } else if (!hasLoadedModelCatalog) {
       console.warn("[model-preflight] models list returned no model ids; skipping strict preflight");
     }
@@ -520,6 +537,8 @@ async function clearMessageDispatchFailure(messageId: string) {
 }
 
 async function syncModels() {
+  await refreshModelCatalog();
+
   const configAgents = await runOpenClawJson<Array<{ id?: string }>>([
     "config",
     "get",
@@ -892,7 +911,11 @@ async function runOpenClawAgentWithFailover(args: {
         throw new Error(errorMessage);
       }
       lastError = error instanceof Error ? error : new Error(errorMessage);
-      if (WATCHER_FAILOVER_ENABLED && isQuotaLikeError(errorMessage) && hasMoreAttempts) {
+      if (
+        WATCHER_FAILOVER_ENABLED &&
+        (isQuotaLikeError(errorMessage) || isModelResolutionError(errorMessage)) &&
+        hasMoreAttempts
+      ) {
         console.warn(
           `[dispatch_failover] dispatchId=${args.dispatchId} runtimeAgent=${args.runtimeAgentId} model=${
             attempt.model || "-"

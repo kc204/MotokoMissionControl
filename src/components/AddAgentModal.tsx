@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -15,7 +15,8 @@ export default function AddAgentModal({
   onCreated?: (id: Id<"agents">) => void;
 }) {
   const createAgent = useMutation(api.agents.createAgent);
-  const models = useQuery(api.models.list) || [];
+  const modelsQuery = useQuery(api.models.list);
+  const models = useMemo(() => modelsQuery ?? [], [modelsQuery]);
 
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
@@ -28,12 +29,29 @@ export default function AddAgentModal({
   const [thinkingModel, setThinkingModel] = useState("google-antigravity/claude-opus-4-5-thinking");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
+  const modelOptions = useMemo(() => {
+    if (thinkingModel && !models.some((m) => m.id === thinkingModel)) {
+      return [{ id: thinkingModel, name: thinkingModel }, ...models];
+    }
+    return models;
+  }, [models, thinkingModel]);
+
+  useEffect(() => {
+    if (models.length === 0) return;
+    if (!thinkingModel || !models.some((m) => m.id === thinkingModel)) {
+      setThinkingModel(models[0].id);
+    }
+  }, [models, thinkingModel]);
 
   if (!isOpen) return null;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !role.trim()) return;
+    if (models.length === 0) {
+      setError("No runtime models available yet. Start watcher and retry.");
+      return;
+    }
 
     setSubmitting(true);
     setError("");
@@ -184,12 +202,15 @@ export default function AddAgentModal({
               onChange={(e) => setThinkingModel(e.target.value)}
               className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
             >
-              {models.map((m) => (
+              {modelOptions.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
                 </option>
               ))}
             </select>
+            {models.length === 0 ? (
+              <p className="mt-1 text-[11px] text-amber-300/80">No runtime models found yet. Start watcher and retry.</p>
+            ) : null}
           </label>
 
           {error && <p className="text-xs text-red-300">{error}</p>}
@@ -204,7 +225,7 @@ export default function AddAgentModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || models.length === 0}
               className="rounded-xl border border-cyan-300/30 bg-cyan-500/15 px-4 py-2 text-sm font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:opacity-60"
             >
               {submitting ? "Deploying..." : "Deploy Agent"}
