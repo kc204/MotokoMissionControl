@@ -29,6 +29,13 @@ function sessionKeyToAgentName(sessionKey?: string | null) {
   return null;
 }
 
+function taskIdFromSessionKey(sessionKey?: string | null) {
+  if (!sessionKey) return null;
+  const match = sessionKey.match(/mission[:-]([a-z0-9]+)/i);
+  if (!match || !match[1]) return null;
+  return match[1];
+}
+
 const eventAction = v.union(
   v.literal("start"),
   v.literal("progress"),
@@ -59,6 +66,24 @@ export const receiveEvent = mutation({
       .query("tasks")
       .withIndex("by_openclawRunId", (q) => q.eq("openclawRunId", args.runId))
       .first();
+
+    if (!task && normalizedSessionKey) {
+      const taskIdToken = taskIdFromSessionKey(normalizedSessionKey);
+      if (taskIdToken) {
+        const normalizedTaskId = ctx.db.normalizeId("tasks", taskIdToken);
+        if (normalizedTaskId) {
+          task = await ctx.db.get(normalizedTaskId);
+          if (task) {
+            await ctx.db.patch(task._id, {
+              sessionKey: normalizedSessionKey,
+              openclawRunId: args.runId,
+              updatedAt: eventTime,
+              lastEventAt: eventTime,
+            });
+          }
+        }
+      }
+    }
 
     const mappedAgentName = args.agentId || sessionKeyToAgentName(args.sessionKey);
     const agent =

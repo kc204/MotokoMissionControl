@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { readFile } from "fs/promises";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
+import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
 import path from "path";
 import { loadMissionControlEnv, resolveMissionControlRoot, resolveScriptPath } from "./lib/mission-control";
@@ -225,6 +226,25 @@ type OpenClawAuthFile = {
   profiles?: Record<string, OpenClawAuthProfileValue>;
 };
 
+type DispatchThreadMessage = {
+  fromUser: boolean;
+  text: string;
+};
+
+type ClaimedTaskDispatch = {
+  dispatchId: Id<"taskDispatches">;
+  taskId: Id<"tasks">;
+  taskTitle: string;
+  taskDescription: string;
+  taskPriority: "low" | "medium" | "high" | "urgent";
+  taskTags: string[];
+  targetAgentId: Id<"agents">;
+  targetAgentName: string;
+  targetSessionKey: string;
+  prompt: string;
+  threadMessages: DispatchThreadMessage[];
+};
+
 function parseProfileId(profileId: string): { provider: string; email: string } {
   const separator = profileId.indexOf(":");
   if (separator === -1) {
@@ -331,6 +351,120 @@ async function syncAuthProfile() {
   console.error(
     `[auth] no agent auth orders updated for profile ${active.profileId} provider=${provider}`
   );
+}
+
+function extractAssistantText(payload: unknown): string {
+  const data = payload as
+    | {
+        result?: { payloads?: Array<{ text?: string | null }> };
+      }
+    | undefined;
+  const payloads = data?.result?.payloads;
+  if (!Array.isArray(payloads)) return "";
+  const parts = payloads
+    .map((item) => (typeof item?.text === "string" ? item.text.trim() : ""))
+    .filter(Boolean);
+  return parts.join("\n\n").trim();
+}
+
+function extractRunId(payload: unknown): string | undefined {
+  const data = payload as
+    | {
+        runId?: string;
+        result?: { runId?: string; meta?: { runId?: string } };
+        meta?: { runId?: string };
+      }
+    | undefined;
+  const candidates = [
+    data?.runId,
+    data?.result?.runId,
+    data?.result?.meta?.runId,
+    data?.meta?.runId,
+  ];
+  return candidates.find((value) => typeof value === "string" && value.trim())?.trim();
+}
+
+function buildTaskDispatchPrompt(dispatch: ClaimedTaskDispatch): string {
+  const lines: string[] = [];
+  lines.push(`Task: ${dispatch.taskTitle}`);
+  lines.push(`Priority: ${dispatch.taskPriority}`);
+  if (dispatch.taskTags.length > 0) {
+    lines.push(`Tags: ${dispatch.taskTags.join(", ")}`);
+  }
+  if (dispatch.taskDescription.trim()) {
+    lines.push("");
+    lines.push("Task Description:");
+    lines.push(dispatch.taskDescription.trim());
+  }
+  if (dispatch.prompt.trim()) {
+    lines.push("");
+    lines.push("Latest User Instruction:");
+    lines.push(dispatch.prompt.trim());
+  }
+  const thread = dispatch.threadMessages
+    .map((message) => `${message.fromUser ? "[HQ]" : "[Agent]"} ${message.text}`.trim())
+    .filter(Boolean)
+    .slice(-16);
+  if (thread.length > 0) {
+    lines.push("");
+    lines.push("Recent Thread Context:");
+    lines.push(thread.join("\n"));
+  }
+  lines.push("");
+  lines.push("Continue this task and provide a concrete output.");
+  return lines.join("\n");
+}
+
+async function processTaskDispatchQueue() {
+  const dispatch = (await client.mutation(api.tasks.claimNextDispatch, {
+    runner: watcherInstanceId,
+  })) as ClaimedTaskDispatch | null;
+  if (!dispatch) return;
+
+  const runtimeAgentId = agentIdFromSessionKey(dispatch.targetSessionKey);
+  const sessionId = `mission-${dispatch.taskId}`;
+  const prompt = buildTaskDispatchPrompt(dispatch);
+  const startedAt = Date.now();
+  console.log(
+    `[task_dispatch_started] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} target=${dispatch.targetAgentName} runtimeAgent=${runtimeAgentId}`
+  );
+
+  try {
+    const result = await runOpenClawJson<unknown>([
+      "agent",
+      "--agent",
+      runtimeAgentId,
+      "--session-id",
+      sessionId,
+      "--message",
+      prompt,
+      "--json",
+    ]);
+
+    const runId = extractRunId(result);
+    const assistantText = extractAssistantText(result);
+    await client.mutation(api.tasks.completeDispatch, {
+      dispatchId: dispatch.dispatchId,
+      runId,
+      resultPreview: assistantText ? assistantText.slice(0, 300) : undefined,
+    });
+    console.log(
+      `[task_dispatch_completed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} status=success durationMs=${
+        Date.now() - startedAt
+      } runId=${runId ?? "-"}`
+    );
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await client.mutation(api.tasks.failDispatch, {
+      dispatchId: dispatch.dispatchId,
+      error: errorMessage.slice(0, 1000),
+    });
+    console.error(
+      `[task_dispatch_completed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} status=failed durationMs=${
+        Date.now() - startedAt
+      } error=${errorMessage}`
+    );
+  }
 }
 
 async function triggerOrchestrator(messageId?: string) {
@@ -448,6 +582,7 @@ async function tick() {
     await checkAndDispatchNewUserMessage();
   }
   await checkManualDispatchRequest();
+  await processTaskDispatchQueue();
 
   if (syncNow - lastModelSyncAt >= MODEL_SYNC_MS) {
     await syncModels();

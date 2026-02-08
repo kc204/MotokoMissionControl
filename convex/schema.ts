@@ -42,7 +42,8 @@ export default defineSchema({
       v.literal("in_progress"),
       v.literal("review"),
       v.literal("done"),
-      v.literal("blocked")
+      v.literal("blocked"),
+      v.literal("archived")
     ),
     priority: v.union(
       v.literal("low"),
@@ -53,6 +54,8 @@ export default defineSchema({
     projectId: v.optional(v.id("projects")),
     assigneeIds: v.array(v.id("agents")),
     createdBy: v.string(),
+    tags: v.optional(v.array(v.string())),
+    borderColor: v.optional(v.string()),
     sessionKey: v.optional(v.string()),
     openclawRunId: v.optional(v.string()),
     source: v.optional(v.string()),
@@ -143,6 +146,27 @@ export default defineSchema({
     .index("by_taskId", ["taskId"])
     .index("by_agentId", ["agentId"])
     .index("by_taskId_agentId", ["taskId", "agentId"]),
+  taskDispatches: defineTable({
+    taskId: v.id("tasks"),
+    targetAgentId: v.optional(v.id("agents")),
+    requestedBy: v.string(),
+    prompt: v.optional(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("running"),
+      v.literal("completed"),
+      v.literal("failed")
+    ),
+    runner: v.optional(v.string()),
+    runId: v.optional(v.string()),
+    resultPreview: v.optional(v.string()),
+    error: v.optional(v.string()),
+    requestedAt: v.number(),
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+  })
+    .index("by_taskId", ["taskId"])
+    .index("by_status_requestedAt", ["status", "requestedAt"]),
   settings: defineTable({
     key: v.string(),
     value: v.any(),

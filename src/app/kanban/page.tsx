@@ -130,7 +130,9 @@ export default function KanbanPage() {
           }}
         />
 
-        <KanbanBoard onSelectTask={setSelectedTaskId} selectedTaskId={selectedTaskId} />
+        <div className="min-w-0">
+          <KanbanBoard onSelectTask={setSelectedTaskId} selectedTaskId={selectedTaskId} />
+        </div>
         <RightSidebar
           selectedDocumentId={selectedDocumentId}
           onSelectDocument={selectDocument}

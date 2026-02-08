@@ -5,13 +5,14 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 
-const statusOptions: Array<{ value: "inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked"; label: string }> = [
+const statusOptions: Array<{ value: "inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked" | "archived"; label: string }> = [
   { value: "inbox", label: "Inbox" },
   { value: "assigned", label: "Assigned" },
   { value: "in_progress", label: "In Progress" },
   { value: "review", label: "Review" },
   { value: "done", label: "Done" },
   { value: "blocked", label: "Blocked" },
+  { value: "archived", label: "Archived" },
 ];
 
 const priorityOptions: Array<{ value: "low" | "medium" | "high" | "urgent"; label: string }> = [
@@ -26,6 +27,15 @@ const docTypes: Array<{ value: "deliverable" | "research" | "spec" | "note"; lab
   { value: "research", label: "Research" },
   { value: "spec", label: "Spec" },
   { value: "note", label: "Note" },
+];
+
+const colorSwatches = [
+  { value: "", label: "Default" },
+  { value: "#22c55e", label: "Green" },
+  { value: "#38bdf8", label: "Cyan" },
+  { value: "#f59e0b", label: "Amber" },
+  { value: "#ef4444", label: "Red" },
+  { value: "#a78bfa", label: "Violet" },
 ];
 
 function timeAgo(ts: number) {
@@ -53,6 +63,7 @@ export default function TaskDetailPanel({
   const docsQuery = useQuery(api.documents.byTask, taskId ? { taskId } : "skip");
   const messagesQuery = useQuery(api.messages.list, taskId ? { channel: `task:${taskId}` } : "skip");
   const activitiesQuery = useQuery(api.activities.forTask, taskId ? { taskId, limit: 40 } : "skip");
+  const dispatchState = useQuery(api.tasks.getDispatchState, taskId ? { taskId } : "skip");
 
   const agents = useMemo(() => agentsQuery ?? [], [agentsQuery]);
   const docs = useMemo(() => docsQuery ?? [], [docsQuery]);
@@ -60,17 +71,24 @@ export default function TaskDetailPanel({
   const activities = useMemo(() => activitiesQuery ?? [], [activitiesQuery]);
 
   const updateStatus = useMutation(api.tasks.updateStatus);
+  const archiveTask = useMutation(api.tasks.archive);
   const updateDetails = useMutation(api.tasks.updateDetails);
   const assignTask = useMutation(api.tasks.assign);
+  const enqueueDispatch = useMutation(api.tasks.enqueueDispatch);
   const sendMessage = useMutation(api.messages.send);
   const createDocument = useMutation(api.documents.create);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<"low" | "medium" | "high" | "urgent">("medium");
-  const [status, setStatus] = useState<"inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked">("inbox");
+  const [status, setStatus] = useState<"inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked" | "archived">("inbox");
   const [assignees, setAssignees] = useState<Id<"agents">[]>([]);
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
+  const [borderColor, setBorderColor] = useState<string>("");
   const [comment, setComment] = useState("");
+  const [dispatchPrompt, setDispatchPrompt] = useState("");
+  const [isDispatching, setIsDispatching] = useState(false);
 
   const [docTitle, setDocTitle] = useState("");
   const [docContent, setDocContent] = useState("");
@@ -84,6 +102,8 @@ export default function TaskDetailPanel({
     setPriority(task.priority);
     setStatus(task.status);
     setAssignees(task.assigneeIds);
+    setTags(task.tags ?? []);
+    setBorderColor(task.borderColor ?? "");
   }, [task]);
 
   const sortedMessages = useMemo(
@@ -101,6 +121,8 @@ export default function TaskDetailPanel({
         title: title.trim(),
         description: description.trim(),
         priority,
+        tags,
+        borderColor: borderColor || undefined,
       });
 
       if (status !== task.status) {
@@ -152,6 +174,44 @@ export default function TaskDetailPanel({
   const toggleAssignee = (id: Id<"agents">) => {
     setAssignees((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
+
+  const addTag = () => {
+    const next = tagInput.trim().replace(/,+$/g, "");
+    if (!next) return;
+    if (tags.includes(next)) {
+      setTagInput("");
+      return;
+    }
+    setTags((prev) => [...prev, next]);
+    setTagInput("");
+  };
+
+  const requestDispatch = async () => {
+    setIsDispatching(true);
+    try {
+      await enqueueDispatch({
+        taskId: task._id,
+        requestedBy: "Mission Control",
+        prompt: dispatchPrompt.trim() || undefined,
+      });
+      setDispatchPrompt("");
+      if (status !== "in_progress") setStatus("in_progress");
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
+  const archiveCurrentTask = async () => {
+    await archiveTask({ id: task._id });
+    onClose();
+  };
+
+  const dispatchStateLabel =
+    dispatchState?.status === "running"
+      ? "Running"
+      : dispatchState?.status === "pending"
+      ? "Queued"
+      : "Idle";
 
   return (
     <aside className="fixed inset-y-0 right-0 z-[90] w-full max-w-xl border-l border-white/10 bg-[linear-gradient(180deg,rgba(9,13,21,0.98),rgba(6,9,14,0.98))] shadow-2xl">
@@ -219,6 +279,69 @@ export default function TaskDetailPanel({
                 className="h-28 w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
               />
             </label>
+
+            <label className="sm:col-span-2 block">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Tags</span>
+              <div className="flex gap-2">
+                <input
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      addTag();
+                    }
+                  }}
+                  placeholder="research, ui, backend"
+                  className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+                />
+                <button
+                  type="button"
+                  onClick={addTag}
+                  className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300 hover:bg-white/5"
+                >
+                  Add
+                </button>
+              </div>
+              {tags.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {tags.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => setTags((prev) => prev.filter((x) => x !== tag))}
+                      className="rounded-full border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[11px] text-zinc-300"
+                    >
+                      {tag} x
+                    </button>
+                  ))}
+                </div>
+              )}
+            </label>
+
+            <div className="sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Card Accent</span>
+              <div className="flex flex-wrap gap-2">
+                {colorSwatches.map((swatch) => (
+                  <button
+                    key={swatch.label}
+                    type="button"
+                    onClick={() => setBorderColor(swatch.value)}
+                    className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                      borderColor === swatch.value
+                        ? "border-cyan-300/40 bg-cyan-500/15 text-cyan-200"
+                        : "border-white/10 bg-white/[0.03] text-zinc-400 hover:bg-white/[0.06]"
+                    }`}
+                  >
+                    <span
+                      className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full align-middle"
+                      style={{ backgroundColor: swatch.value || "#71717a" }}
+                    />
+                    {swatch.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div>
@@ -303,6 +426,37 @@ export default function TaskDetailPanel({
           </div>
 
           <div className="rounded-xl border border-white/10 bg-black/25 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Agent Dispatch</p>
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-zinc-400">
+                {dispatchStateLabel}
+              </span>
+            </div>
+            <textarea
+              value={dispatchPrompt}
+              onChange={(e) => setDispatchPrompt(e.target.value)}
+              placeholder="Optional instruction for this run..."
+              className="h-16 w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+            />
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={requestDispatch}
+                disabled={isDispatching || dispatchState?.status === "pending" || dispatchState?.status === "running"}
+                className="rounded-lg border border-emerald-300/30 bg-emerald-500/15 px-3 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
+              >
+                {dispatchState?.status === "running"
+                  ? "Running..."
+                  : dispatchState?.status === "pending"
+                  ? "Queued..."
+                  : isDispatching
+                  ? "Queueing..."
+                  : "Run / Resume Task"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-black/25 p-3">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Comments</p>
             <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
               {sortedMessages.map((msg) => (
@@ -348,13 +502,24 @@ export default function TaskDetailPanel({
         </div>
 
         <div className="flex items-center justify-between border-t border-white/10 px-4 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-400 hover:bg-white/5"
-          >
-            Cancel
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-400 hover:bg-white/5"
+            >
+              Cancel
+            </button>
+            {task.status !== "archived" && (
+              <button
+                type="button"
+                onClick={archiveCurrentTask}
+                className="rounded-lg border border-amber-300/30 bg-amber-500/15 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-500/25"
+              >
+                Archive
+              </button>
+            )}
+          </div>
           <button
             type="button"
             onClick={saveDetails}
