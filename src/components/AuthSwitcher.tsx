@@ -53,7 +53,7 @@ export default function AuthSwitcher() {
       </button>
 
       {isOpen && (
-        <div className="absolute bottom-full left-0 z-50 mb-2 w-full overflow-hidden rounded-xl border border-white/10 bg-black/90 shadow-xl backdrop-blur-xl">
+        <div className="absolute left-0 top-full z-[60] mt-2 w-full overflow-hidden rounded-xl border border-white/10 bg-black/90 shadow-xl backdrop-blur-xl">
           <div className="space-y-1 p-2">
             {profiles.map((profile) => (
               <button
@@ -72,6 +72,11 @@ export default function AuthSwitcher() {
                 {profile.isActive && <span>OK</span>}
               </button>
             ))}
+            {profiles.length < 2 && (
+              <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-[11px] text-zinc-500">
+                No alternate profiles found.
+              </div>
+            )}
           </div>
         </div>
       )}
