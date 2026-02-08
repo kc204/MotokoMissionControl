@@ -14,7 +14,6 @@ const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const POLL_MS = Number(process.env.WATCHER_POLL_MS || 1000);
 const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 60000);
-const AUTH_SYNC_MS = Number(process.env.WATCHER_AUTH_SYNC_MS || 30000);
 const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
 const WATCHER_LEASE_KEY = "watcher:leader";
 const WATCHER_LAST_SEEN_USER_MESSAGE_KEY = "watcher:last_seen_hq_user_message_id";
@@ -36,7 +35,6 @@ let orchestratorBusy = false;
 let isLeader = false;
 let lastLeaseCheckAt = 0;
 let lastModelSyncAt = 0;
-let lastAuthSyncAt = 0;
 let lastSeenUserMessageId: string | null = null;
 let hasLoadedLastSeenUserMessageId = false;
 let lastManualDispatchToken: string | null = null;
@@ -214,9 +212,20 @@ async function syncModels() {
 async function syncAuthProfile() {
   const active = await client.query(api.auth.getActive);
   if (!active) return;
-  if (active.profileId === activeAuthProfile) return;
+  const provider =
+    (typeof active.provider === "string" && active.provider) ||
+    active.profileId.split(":")[0] ||
+    "";
+  if (!provider) {
+    console.error(`[auth] unable to determine provider for profile ${active.profileId}`);
+    return;
+  }
+
+  const syncKey = `${provider}:${active.profileId}`;
+  if (syncKey === activeAuthProfile) return;
 
   const agents = await client.query(api.agents.list);
+  let successCount = 0;
   for (const agent of agents) {
     const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
     try {
@@ -225,17 +234,29 @@ async function syncAuthProfile() {
         "auth",
         "order",
         "set",
+        "--provider",
+        provider,
         "--agent",
         openclawAgentId,
         active.profileId,
       ]);
+      successCount += 1;
     } catch (error) {
       console.error(`[auth] failed for ${agent.name}:`, error);
     }
   }
 
-  activeAuthProfile = active.profileId;
-  console.log(`[auth] active profile set to ${active.profileId}`);
+  if (successCount > 0) {
+    activeAuthProfile = syncKey;
+    console.log(
+      `[auth] active profile set to ${active.profileId} provider=${provider} syncedAgents=${successCount}/${agents.length}`
+    );
+    return;
+  }
+
+  console.error(
+    `[auth] no agent auth orders updated for profile ${active.profileId} provider=${provider}`
+  );
 }
 
 async function triggerOrchestrator(messageId?: string) {
@@ -353,10 +374,7 @@ async function tick() {
     lastModelSyncAt = syncNow;
   }
 
-  if (syncNow - lastAuthSyncAt >= AUTH_SYNC_MS) {
-    await syncAuthProfile();
-    lastAuthSyncAt = syncNow;
-  }
+  await syncAuthProfile();
 }
 
 async function main() {

@@ -43,6 +43,8 @@ interface Task {
   description: string;
   status: TaskStatus;
   priority: "low" | "medium" | "high" | "urgent";
+  assigneeIds: Id<"agents">[];
+  updatedAt: number;
 }
 
 function priorityClass(priority: Task["priority"]) {
@@ -52,11 +54,26 @@ function priorityClass(priority: Task["priority"]) {
   return "border-zinc-500/40 bg-zinc-500/15 text-zinc-300";
 }
 
+function timeAgo(ts: number) {
+  const delta = Date.now() - ts;
+  const m = Math.floor(delta / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 function TaskCard({
   task,
+  assigneeName,
+  selected,
   onSelect,
 }: {
   task: Task;
+  assigneeName: string;
+  selected: boolean;
   onSelect?: (id: Id<"tasks">) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
@@ -75,7 +92,11 @@ function TaskCard({
       style={style}
       {...attributes}
       {...listeners}
-      className="mb-3 cursor-grab rounded-xl border border-white/10 bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-3.5 transition-colors hover:border-white/20 active:cursor-grabbing"
+      className={`mb-3 cursor-grab rounded-xl border bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-3.5 transition-colors active:cursor-grabbing ${
+        selected
+          ? "border-cyan-300/40 ring-1 ring-cyan-300/35"
+          : "border-white/10 hover:border-white/20"
+      }`}
     >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span
@@ -89,10 +110,18 @@ function TaskCard({
       <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-400">
         {task.description || "No description"}
       </p>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+        <span className="truncate">{assigneeName}</span>
+        <span>{timeAgo(task.updatedAt)}</span>
+      </div>
       {onSelect && (
         <button
           type="button"
-          onClick={() => onSelect(task._id)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(task._id);
+          }}
           className="mt-2 rounded-lg border border-cyan-300/30 bg-cyan-500/12 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20"
         >
           Open
@@ -104,11 +133,19 @@ function TaskCard({
 
 export default function KanbanBoard({
   onSelectTask,
+  selectedTaskId,
 }: {
   onSelectTask?: (id: Id<"tasks">) => void;
+  selectedTaskId?: Id<"tasks"> | null;
 }) {
   const tasksQuery = useQuery(api.tasks.list);
+  const agentsQuery = useQuery(api.agents.list);
   const tasks = useMemo(() => tasksQuery ?? [], [tasksQuery]);
+  const agents = useMemo(() => agentsQuery ?? [], [agentsQuery]);
+  const agentNameById = useMemo(
+    () => new Map(agents.map((agent) => [agent._id, agent.name])),
+    [agents]
+  );
   const updateStatus = useMutation(api.tasks.updateStatus);
   const [activeId, setActiveId] = useState<Id<"tasks"> | null>(null);
 
@@ -164,7 +201,17 @@ export default function KanbanBoard({
                       </div>
                     )}
                     {columnTasks.map((task) => (
-                      <TaskCard key={task._id} task={task} onSelect={onSelectTask} />
+                      <TaskCard
+                        key={task._id}
+                        task={task}
+                        assigneeName={
+                          task.assigneeIds[0]
+                            ? (agentNameById.get(task.assigneeIds[0]) ?? "Assigned")
+                            : "Unassigned"
+                        }
+                        selected={selectedTaskId === task._id}
+                        onSelect={onSelectTask}
+                      />
                     ))}
                   </div>
                 </SortableContext>

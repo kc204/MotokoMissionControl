@@ -4,12 +4,13 @@ import KanbanBoard from "@/components/KanbanBoard";
 import NewTaskModal from "@/components/NewTaskModal";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Id } from "../../../convex/_generated/dataModel";
 import TaskDetailPanel from "@/components/TaskDetailPanel";
 import RightSidebar from "@/components/RightSidebar";
 import DocumentConversationTray from "@/components/DocumentConversationTray";
 import DocumentPreviewTray from "@/components/DocumentPreviewTray";
+import AgentsSidebarPanel from "@/components/AgentsSidebarPanel";
 
 export default function KanbanPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -17,6 +18,8 @@ export default function KanbanPage() {
   const [selectedDocumentId, setSelectedDocumentId] = useState<Id<"documents"> | null>(null);
   const [showConversationTray, setShowConversationTray] = useState(false);
   const [showPreviewTray, setShowPreviewTray] = useState(false);
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const tasksQuery = useQuery(api.tasks.list);
   const tasks = useMemo(() => tasksQuery ?? [], [tasksQuery]);
 
@@ -26,6 +29,17 @@ export default function KanbanPage() {
     const done = tasks.filter((t) => t.status === "done").length;
     return { total: tasks.length, inProgress, review, done };
   }, [tasks]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setLeftDrawerOpen(false);
+        setRightDrawerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const selectDocument = (id: Id<"documents"> | null) => {
     if (!id) {
@@ -84,14 +98,80 @@ export default function KanbanPage() {
       </header>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <KanbanBoard onSelectTask={setSelectedTaskId} />
+        <div className="xl:hidden flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setLeftDrawerOpen(true);
+              setRightDrawerOpen(false);
+            }}
+            className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold uppercase tracking-wider text-zinc-300"
+          >
+            Team
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRightDrawerOpen(true);
+              setLeftDrawerOpen(false);
+            }}
+            className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold uppercase tracking-wider text-zinc-300"
+          >
+            Live Feed
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)_360px]">
+        <AgentsSidebarPanel
+          className="hidden xl:block"
+          onSelectAgent={() => {
+            setLeftDrawerOpen(false);
+          }}
+        />
+
+        <KanbanBoard onSelectTask={setSelectedTaskId} selectedTaskId={selectedTaskId} />
         <RightSidebar
           selectedDocumentId={selectedDocumentId}
           onSelectDocument={selectDocument}
           onPreviewDocument={previewDocument}
+          className="hidden xl:block"
         />
       </div>
       <NewTaskModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+
+      {(leftDrawerOpen || rightDrawerOpen) && (
+        <div
+          className="fixed inset-0 z-[87] bg-black/60 backdrop-blur-[1px] xl:hidden"
+          onClick={() => {
+            setLeftDrawerOpen(false);
+            setRightDrawerOpen(false);
+          }}
+          aria-hidden="true"
+        />
+      )}
+
+      {leftDrawerOpen && (
+        <div className="fixed inset-y-0 left-0 z-[88] w-[88vw] max-w-[320px] p-3 xl:hidden">
+          <AgentsSidebarPanel
+            className="h-full"
+            onSelectAgent={() => {
+              setLeftDrawerOpen(false);
+            }}
+          />
+        </div>
+      )}
+
+      {rightDrawerOpen && (
+        <div className="fixed inset-y-0 right-0 z-[88] w-[92vw] max-w-[380px] p-3 xl:hidden">
+          <RightSidebar
+            selectedDocumentId={selectedDocumentId}
+            onSelectDocument={selectDocument}
+            onPreviewDocument={previewDocument}
+            className="h-full"
+          />
+        </div>
+      )}
 
       {selectedTaskId && (
         <>

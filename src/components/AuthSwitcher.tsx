@@ -1,57 +1,75 @@
 "use client";
 
-import { useQuery, useMutation } from "convex/react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
-import { useState, useEffect } from "react";
 
 export default function AuthSwitcher() {
-  const profiles = useQuery(api.auth.list) || [];
+  const profilesQuery = useQuery(api.auth.list);
+  const profiles = profilesQuery ?? [];
   const activeProfile = useQuery(api.auth.getActive);
   const setActive = useMutation(api.auth.setActive);
   const seed = useMutation(api.auth.seed);
   const [isOpen, setIsOpen] = useState(false);
 
-  // Auto-seed on first load if empty
   useEffect(() => {
-    if (profiles.length === 0) {
-      seed();
+    if (profilesQuery === undefined) return;
+    if (profilesQuery.length === 0) {
+      void seed();
     }
-  }, [profiles, seed]);
+  }, [profilesQuery, seed]);
 
-  if (!activeProfile) return <div className="animate-pulse h-10 w-full bg-white/5 rounded-xl" />;
+  if (activeProfile === undefined) {
+    return <div className="h-10 w-full animate-pulse rounded-xl bg-white/5" />;
+  }
+
+  const selectedProfile = activeProfile ?? null;
+  const hasProfiles = profiles.length > 0;
+  const initials = selectedProfile?.email?.[0]?.toUpperCase() ?? "?";
+  const title = selectedProfile?.email ?? "Select Provider Profile";
+  const subtitle = selectedProfile?.provider ?? (hasProfiles ? "Choose an account to activate" : "No profiles found");
 
   return (
     <div className="relative">
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-3 w-full px-3 py-2 rounded-xl hover:bg-white/5 transition-colors border border-transparent hover:border-white/10"
+        onClick={() => {
+          if (!hasProfiles) return;
+          setIsOpen((open) => !open);
+        }}
+        className={`flex w-full items-center gap-3 rounded-xl border px-3 py-2 transition-colors ${
+          hasProfiles
+            ? "border-transparent hover:border-white/10 hover:bg-white/5"
+            : "border-white/10 bg-white/[0.03]"
+        }`}
       >
-        <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center text-xs font-bold text-white">
-          {activeProfile.email[0].toUpperCase()}
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-tr from-blue-500 to-cyan-500 text-xs font-bold text-white">
+          {initials}
         </div>
-        <div className="flex-1 text-left overflow-hidden">
-          <p className="text-xs font-medium text-white truncate">{activeProfile.email}</p>
-          <p className="text-[10px] text-zinc-500 truncate">{activeProfile.provider}</p>
+        <div className="flex-1 overflow-hidden text-left">
+          <p className="truncate text-xs font-medium text-white">{title}</p>
+          <p className="truncate text-[10px] text-zinc-500">{subtitle}</p>
         </div>
-        <span className="text-zinc-500 text-xs">▼</span>
+        <span className="text-xs text-zinc-500">{hasProfiles ? "v" : "-"}</span>
       </button>
 
       {isOpen && (
-        <div className="absolute bottom-full left-0 w-full mb-2 bg-black/90 backdrop-blur-xl border border-white/10 rounded-xl overflow-hidden shadow-xl z-50">
-          <div className="p-2 space-y-1">
-            {profiles.map((p) => (
+        <div className="absolute bottom-full left-0 z-50 mb-2 w-full overflow-hidden rounded-xl border border-white/10 bg-black/90 shadow-xl backdrop-blur-xl">
+          <div className="space-y-1 p-2">
+            {profiles.map((profile) => (
               <button
-                key={p._id}
+                key={profile._id}
                 onClick={() => {
-                  setActive({ id: p._id });
+                  void setActive({ id: profile._id });
                   setIsOpen(false);
                 }}
-                className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors flex items-center justify-between ${
-                  p.isActive ? "bg-blue-600/20 text-blue-400" : "text-zinc-400 hover:text-white hover:bg-white/10"
+                className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-colors ${
+                  profile.isActive
+                    ? "bg-blue-600/20 text-blue-300"
+                    : "text-zinc-400 hover:bg-white/10 hover:text-white"
                 }`}
               >
-                <span className="truncate">{p.email}</span>
-                {p.isActive && <span>✓</span>}
+                <span className="truncate">{profile.email}</span>
+                {profile.isActive && <span>OK</span>}
               </button>
             ))}
           </div>
