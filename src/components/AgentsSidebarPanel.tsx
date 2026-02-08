@@ -5,7 +5,8 @@ import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 
-function levelBadge(role: string) {
+function levelBadge(role: string, level?: "LEAD" | "INT" | "SPC") {
+  if (level) return level;
   const r = role.toLowerCase();
   if (r.includes("lead")) return "LEAD";
   if (r.includes("monitor") || r.includes("research")) return "SPC";
@@ -70,7 +71,7 @@ export default function AgentsSidebarPanel({
                 <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">{agent.role}</p>
               </div>
               <span className="rounded border border-cyan-300/25 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
-                {levelBadge(agent.role)}
+                {levelBadge(agent.role, agent.level)}
               </span>
             </div>
             <div className="mt-2 flex items-center justify-between">

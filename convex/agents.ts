@@ -2,6 +2,14 @@ import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 
 const agentStatus = v.union(v.literal("idle"), v.literal("active"), v.literal("blocked"));
+const agentLevel = v.union(v.literal("LEAD"), v.literal("INT"), v.literal("SPC"));
+
+function inferLevelFromRole(role: string) {
+  const normalized = role.toLowerCase();
+  if (normalized.includes("lead")) return "LEAD" as const;
+  if (normalized.includes("research") || normalized.includes("monitor")) return "SPC" as const;
+  return "INT" as const;
+}
 
 function slugifyAgentId(input: string) {
   const base = input
@@ -59,8 +67,12 @@ export const createAgent = mutation({
   args: {
     name: v.string(),
     role: v.string(),
+    level: v.optional(agentLevel),
     status: v.optional(agentStatus),
     avatar: v.optional(v.string()),
+    systemPrompt: v.optional(v.string()),
+    character: v.optional(v.string()),
+    lore: v.optional(v.string()),
     sessionIdHint: v.optional(v.string()),
     thinkingModel: v.optional(v.string()),
     executionModel: v.optional(v.string()),
@@ -91,10 +103,14 @@ export const createAgent = mutation({
     const agentId = await ctx.db.insert("agents", {
       name: args.name,
       role: args.role,
+      level: args.level ?? inferLevelFromRole(args.role),
       status: args.status ?? "idle",
       currentTaskId: undefined,
       sessionKey: `agent:${runtimeId}:main`,
       avatar: args.avatar,
+      systemPrompt: args.systemPrompt,
+      character: args.character,
+      lore: args.lore,
       models: {
         thinking: args.thinkingModel ?? "google-antigravity/claude-opus-4-5-thinking",
         execution: args.executionModel,
@@ -121,8 +137,12 @@ export const updateAgent = mutation({
     id: v.id("agents"),
     name: v.optional(v.string()),
     role: v.optional(v.string()),
+    level: v.optional(agentLevel),
     status: v.optional(agentStatus),
     avatar: v.optional(v.string()),
+    systemPrompt: v.optional(v.string()),
+    character: v.optional(v.string()),
+    lore: v.optional(v.string()),
     sessionKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -143,8 +163,12 @@ export const updateAgent = mutation({
     const patch: {
       name?: string;
       role?: string;
+      level?: "LEAD" | "INT" | "SPC";
       status?: "idle" | "active" | "blocked";
       avatar?: string;
+      systemPrompt?: string;
+      character?: string;
+      lore?: string;
       sessionKey?: string;
       updatedAt: number;
     } = {
@@ -153,9 +177,16 @@ export const updateAgent = mutation({
 
     if (args.name !== undefined) patch.name = args.name;
     if (args.role !== undefined) patch.role = args.role;
+    if (args.level !== undefined) patch.level = args.level;
     if (args.status !== undefined) patch.status = args.status;
     if (args.avatar !== undefined) patch.avatar = args.avatar;
+    if (args.systemPrompt !== undefined) patch.systemPrompt = args.systemPrompt;
+    if (args.character !== undefined) patch.character = args.character;
+    if (args.lore !== undefined) patch.lore = args.lore;
     if (args.sessionKey !== undefined) patch.sessionKey = args.sessionKey;
+    if (args.role !== undefined && args.level === undefined) {
+      patch.level = inferLevelFromRole(args.role);
+    }
 
     await ctx.db.patch(args.id, patch);
   },

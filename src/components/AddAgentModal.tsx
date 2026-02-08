@@ -19,8 +19,12 @@ export default function AddAgentModal({
 
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
+  const [level, setLevel] = useState<"LEAD" | "INT" | "SPC">("SPC");
   const [avatar, setAvatar] = useState("");
   const [status, setStatus] = useState<"idle" | "active" | "blocked">("idle");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [character, setCharacter] = useState("");
+  const [lore, setLore] = useState("");
   const [thinkingModel, setThinkingModel] = useState("google-antigravity/claude-opus-4-5-thinking");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
@@ -37,15 +41,23 @@ export default function AddAgentModal({
       const agentId = await createAgent({
         name: name.trim(),
         role: role.trim(),
+        level,
         avatar: avatar.trim() || undefined,
         status,
+        systemPrompt: systemPrompt.trim() || undefined,
+        character: character.trim() || undefined,
+        lore: lore.trim() || undefined,
         sessionIdHint: name.trim(),
         thinkingModel,
       });
       setName("");
       setRole("");
+      setLevel("SPC");
       setAvatar("");
       setStatus("idle");
+      setSystemPrompt("");
+      setCharacter("");
+      setLore("");
       onCreated?.(agentId);
       onClose();
     } catch (err) {
@@ -96,6 +108,19 @@ export default function AddAgentModal({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Level</span>
+              <select
+                value={level}
+                onChange={(e) => setLevel(e.target.value as "LEAD" | "INT" | "SPC")}
+                className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+              >
+                <option value="LEAD">LEAD</option>
+                <option value="INT">INT</option>
+                <option value="SPC">SPC</option>
+              </select>
+            </label>
+
+            <label className="block">
               <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Avatar URL (Optional)</span>
               <input
                 value={avatar}
@@ -118,6 +143,39 @@ export default function AddAgentModal({
               </select>
             </label>
           </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">System Prompt</span>
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              rows={3}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+              placeholder="Core operating instructions for this agent..."
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Character</span>
+            <textarea
+              value={character}
+              onChange={(e) => setCharacter(e.target.value)}
+              rows={3}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+              placeholder="Personality, tone, and communication style..."
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Lore</span>
+            <textarea
+              value={lore}
+              onChange={(e) => setLore(e.target.value)}
+              rows={3}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+              placeholder="Backstory and domain expertise context..."
+            />
+          </label>
 
           <label className="block">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Thinking Model</span>

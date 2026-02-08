@@ -241,6 +241,11 @@ type ClaimedTaskDispatch = {
   targetAgentId: Id<"agents">;
   targetAgentName: string;
   targetSessionKey: string;
+  targetAgentLevel: "LEAD" | "INT" | "SPC";
+  targetAgentRole: string;
+  targetAgentSystemPrompt: string;
+  targetAgentCharacter: string;
+  targetAgentLore: string;
   prompt: string;
   threadMessages: DispatchThreadMessage[];
 };
@@ -386,6 +391,23 @@ function extractRunId(payload: unknown): string | undefined {
 
 function buildTaskDispatchPrompt(dispatch: ClaimedTaskDispatch): string {
   const lines: string[] = [];
+  lines.push(`Assigned Agent: ${dispatch.targetAgentName} (${dispatch.targetAgentRole}, ${dispatch.targetAgentLevel})`);
+  if (dispatch.targetAgentSystemPrompt.trim()) {
+    lines.push("");
+    lines.push("Agent System Prompt:");
+    lines.push(dispatch.targetAgentSystemPrompt.trim());
+  }
+  if (dispatch.targetAgentCharacter.trim()) {
+    lines.push("");
+    lines.push("Agent Character:");
+    lines.push(dispatch.targetAgentCharacter.trim());
+  }
+  if (dispatch.targetAgentLore.trim()) {
+    lines.push("");
+    lines.push("Agent Lore:");
+    lines.push(dispatch.targetAgentLore.trim());
+  }
+  lines.push("");
   lines.push(`Task: ${dispatch.taskTitle}`);
   lines.push(`Priority: ${dispatch.taskPriority}`);
   if (dispatch.taskTags.length > 0) {

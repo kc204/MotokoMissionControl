@@ -6,7 +6,7 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 
 type LiveFeedType = "all" | "task_created" | "task_updated" | "message_sent" | "agent_status_changed" | "document_created";
-type DocumentType = "all" | "deliverable" | "research" | "spec" | "note";
+type DocumentType = "all" | "deliverable" | "research" | "spec" | "note" | "markdown";
 type TabId = "live-feed" | "documents";
 
 const liveFeedFilters: Array<{ id: LiveFeedType; label: string }> = [
@@ -24,6 +24,7 @@ const documentFilters: Array<{ id: DocumentType; label: string }> = [
   { id: "research", label: "Research" },
   { id: "spec", label: "Specs" },
   { id: "note", label: "Notes" },
+  { id: "markdown", label: "Markdown" },
 ];
 
 function timeAgo(ts: number) {
@@ -76,7 +77,9 @@ export default function RightSidebar({
 
   const visibleDocuments = useMemo(() => {
     if (!selectedAgent) return documents;
-    return documents.filter((doc) => doc.createdBy === selectedAgent.name);
+    return documents.filter(
+      (doc) => doc.createdByAgentId === selectedAgent._id || doc.createdBy === selectedAgent.name
+    );
   }, [documents, selectedAgent]);
 
   return (

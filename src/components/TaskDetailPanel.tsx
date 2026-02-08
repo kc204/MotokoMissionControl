@@ -22,11 +22,12 @@ const priorityOptions: Array<{ value: "low" | "medium" | "high" | "urgent"; labe
   { value: "urgent", label: "Urgent" },
 ];
 
-const docTypes: Array<{ value: "deliverable" | "research" | "spec" | "note"; label: string }> = [
+const docTypes: Array<{ value: "deliverable" | "research" | "spec" | "note" | "markdown"; label: string }> = [
   { value: "deliverable", label: "Deliverable" },
   { value: "research", label: "Research" },
   { value: "spec", label: "Spec" },
   { value: "note", label: "Note" },
+  { value: "markdown", label: "Markdown" },
 ];
 
 const colorSwatches = [
@@ -92,7 +93,7 @@ export default function TaskDetailPanel({
 
   const [docTitle, setDocTitle] = useState("");
   const [docContent, setDocContent] = useState("");
-  const [docType, setDocType] = useState<"deliverable" | "research" | "spec" | "note">("note");
+  const [docType, setDocType] = useState<"deliverable" | "research" | "spec" | "note" | "markdown">("note");
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {

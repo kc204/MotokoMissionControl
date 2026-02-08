@@ -4,6 +4,7 @@ const canonicalAgents = [
   {
     name: "Motoko",
     role: "Squad Lead",
+    level: "LEAD" as const,
     status: "active" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Motoko",
     models: {
@@ -16,6 +17,7 @@ const canonicalAgents = [
   {
     name: "Forge",
     role: "Developer",
+    level: "INT" as const,
     status: "idle" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Forge",
     models: {
@@ -29,6 +31,7 @@ const canonicalAgents = [
   {
     name: "Quill",
     role: "Writer",
+    level: "INT" as const,
     status: "idle" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Quill",
     models: {
@@ -41,6 +44,7 @@ const canonicalAgents = [
   {
     name: "Recon",
     role: "Researcher",
+    level: "SPC" as const,
     status: "idle" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Recon",
     models: {
@@ -53,6 +57,7 @@ const canonicalAgents = [
   {
     name: "Pulse",
     role: "Monitor",
+    level: "SPC" as const,
     status: "idle" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Pulse",
     models: {
@@ -99,6 +104,7 @@ export const normalizeAgents = mutation({
 
       await ctx.db.patch(existing._id, {
         role: canonical.role,
+        level: canonical.level,
         status: canonical.status,
         sessionKey: canonical.sessionKey,
         models: canonical.models,

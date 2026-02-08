@@ -11,6 +11,7 @@ export default defineSchema({
   agents: defineTable({
     name: v.string(),
     role: v.string(),
+    level: v.optional(v.union(v.literal("LEAD"), v.literal("INT"), v.literal("SPC"))),
     status: v.union(
       v.literal("idle"),
       v.literal("active"),
@@ -19,6 +20,9 @@ export default defineSchema({
     currentTaskId: v.optional(v.id("tasks")),
     sessionKey: v.string(),
     avatar: v.optional(v.string()),
+    systemPrompt: v.optional(v.string()),
+    character: v.optional(v.string()),
+    lore: v.optional(v.string()),
     models: v.object({
       thinking: v.string(),
       execution: v.optional(v.string()),
@@ -108,16 +112,22 @@ export default defineSchema({
       v.literal("deliverable"),
       v.literal("research"),
       v.literal("spec"),
-      v.literal("note")
+      v.literal("note"),
+      v.literal("markdown")
     ),
+    path: v.optional(v.string()),
     taskId: v.optional(v.id("tasks")),
     projectId: v.optional(v.id("projects")),
     createdBy: v.string(),
+    createdByAgentId: v.optional(v.id("agents")),
+    messageId: v.optional(v.id("messages")),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_taskId", ["taskId"])
     .index("by_projectId", ["projectId"])
+    .index("by_createdByAgentId", ["createdByAgentId"])
+    .index("by_messageId", ["messageId"])
     .index("by_createdAt", ["createdAt"]),
   notifications: defineTable({
     targetAgentId: v.id("agents"),

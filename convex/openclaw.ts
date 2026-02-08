@@ -1,4 +1,5 @@
 import { mutation } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 
 function summarizePrompt(prompt: string) {
@@ -40,8 +41,19 @@ const eventAction = v.union(
   v.literal("start"),
   v.literal("progress"),
   v.literal("end"),
-  v.literal("error")
+  v.literal("error"),
+  v.literal("document")
 );
+
+function normalizeDocumentType(type?: string | null): "deliverable" | "research" | "spec" | "note" | "markdown" {
+  const normalized = (type ?? "").trim().toLowerCase();
+  if (normalized === "deliverable") return "deliverable";
+  if (normalized === "research") return "research";
+  if (normalized === "spec") return "spec";
+  if (normalized === "markdown" || normalized === "md") return "markdown";
+  if (normalized === "note") return "note";
+  return "note";
+}
 
 export const receiveEvent = mutation({
   args: {
@@ -56,6 +68,14 @@ export const receiveEvent = mutation({
     response: v.optional(v.union(v.string(), v.null())),
     error: v.optional(v.union(v.string(), v.null())),
     eventType: v.optional(v.union(v.string(), v.null())),
+    document: v.optional(
+      v.object({
+        title: v.string(),
+        content: v.string(),
+        type: v.string(),
+        path: v.optional(v.union(v.string(), v.null())),
+      })
+    ),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -126,19 +146,21 @@ export const receiveEvent = mutation({
       });
     }
 
-    if (!task) return;
+    if (!task && args.action !== "document") return;
 
-    await ctx.db.patch(task._id, {
-      lastEventAt: eventTime,
-      updatedAt: eventTime,
-      sessionKey: normalizedSessionKey ?? task.sessionKey,
-      openclawRunId: args.runId,
-      source: args.source ?? task.source,
-    });
+    if (task) {
+      await ctx.db.patch(task._id, {
+        lastEventAt: eventTime,
+        updatedAt: eventTime,
+        sessionKey: normalizedSessionKey ?? task.sessionKey,
+        openclawRunId: args.runId,
+        source: args.source ?? task.source,
+      });
+    }
 
     const fromAgentId = agent?._id;
 
-    if (args.action === "progress") {
+    if (args.action === "progress" && task) {
       if (args.message) {
         await ctx.db.insert("messages", {
           taskId: task._id,
@@ -155,7 +177,7 @@ export const receiveEvent = mutation({
       return;
     }
 
-    if (args.action === "end") {
+    if (args.action === "end" && task) {
       const durationMs = eventTime - (task.startedAt || task.createdAt);
       const completionMsg = args.response
         ? `Completed in ${formatDuration(durationMs)}\n\n${args.response}`
@@ -189,7 +211,7 @@ export const receiveEvent = mutation({
       return;
     }
 
-    if (args.action === "error") {
+    if (args.action === "error" && task) {
       const err = args.error || "Unknown OpenClaw error";
       await ctx.db.patch(task._id, {
         status: "review",
@@ -211,6 +233,58 @@ export const receiveEvent = mutation({
         agentId: fromAgentId,
         taskId: task._id,
         message: `OpenClaw error for "${task.title}"`,
+        createdAt: eventTime,
+      });
+      return;
+    }
+
+    if (args.action === "document" && args.document) {
+      const createdBy = agent?.name ?? args.agentId ?? "OpenClaw";
+      const documentType = normalizeDocumentType(args.document.type);
+
+      const messageContent =
+        `Document created: "${args.document.title}"\n\n` +
+        `Type: ${documentType}` +
+        (args.document.path ? `\nPath: ${args.document.path}` : "");
+
+      let messageId: Id<"messages"> | undefined;
+
+      if (task) {
+        messageId = await ctx.db.insert("messages", {
+          taskId: task._id,
+          fromAgentId,
+          agentId: fromAgentId,
+          fromUser: false,
+          content: messageContent,
+          text: messageContent,
+          mentions: [],
+          channel: `task:${task._id}`,
+          createdAt: eventTime,
+        });
+      }
+
+      await ctx.db.insert("documents", {
+        title: args.document.title,
+        content: args.document.content,
+        type: documentType,
+        path: args.document.path ?? undefined,
+        taskId: task?._id,
+        projectId: task?.projectId,
+        createdBy,
+        createdByAgentId: fromAgentId,
+        messageId,
+        createdAt: eventTime,
+        updatedAt: eventTime,
+      });
+
+      await ctx.db.insert("activities", {
+        type: "document_created",
+        agentId: fromAgentId,
+        taskId: task?._id,
+        projectId: task?.projectId,
+        message: task
+          ? `${createdBy} created document "${args.document.title}" for "${task.title}"`
+          : `${createdBy} created document "${args.document.title}"`,
         createdAt: eventTime,
       });
     }

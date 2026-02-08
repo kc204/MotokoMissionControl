@@ -18,8 +18,12 @@ export default function AgentDetailTray({
 
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
+  const [level, setLevel] = useState<"LEAD" | "INT" | "SPC">("SPC");
   const [avatar, setAvatar] = useState("");
   const [status, setStatus] = useState<"idle" | "active" | "blocked">("idle");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [character, setCharacter] = useState("");
+  const [lore, setLore] = useState("");
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -27,8 +31,12 @@ export default function AgentDetailTray({
     if (!agent) return;
     setName(agent.name);
     setRole(agent.role);
+    setLevel(agent.level ?? "SPC");
     setAvatar(agent.avatar || "");
     setStatus(agent.status);
+    setSystemPrompt(agent.systemPrompt || "");
+    setCharacter(agent.character || "");
+    setLore(agent.lore || "");
     setIsEditing(false);
   }, [agent]);
 
@@ -41,13 +49,29 @@ export default function AgentDetailTray({
         id: agent._id,
         name: name.trim(),
         role: role.trim(),
+        level,
         avatar: avatar.trim() || undefined,
         status,
+        systemPrompt: systemPrompt.trim() || undefined,
+        character: character.trim() || undefined,
+        lore: lore.trim() || undefined,
       });
       setIsEditing(false);
     } finally {
       setSaving(false);
     }
+  };
+
+  const cancelEdit = () => {
+    setName(agent.name);
+    setRole(agent.role);
+    setLevel(agent.level ?? "SPC");
+    setAvatar(agent.avatar || "");
+    setStatus(agent.status);
+    setSystemPrompt(agent.systemPrompt || "");
+    setCharacter(agent.character || "");
+    setLore(agent.lore || "");
+    setIsEditing(false);
   };
 
   const remove = async () => {
@@ -97,6 +121,20 @@ export default function AgentDetailTray({
           </label>
 
           <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Level</span>
+            <select
+              disabled={!isEditing}
+              value={level}
+              onChange={(e) => setLevel(e.target.value as "LEAD" | "INT" | "SPC")}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100 disabled:opacity-70"
+            >
+              <option value="LEAD">LEAD</option>
+              <option value="INT">INT</option>
+              <option value="SPC">SPC</option>
+            </select>
+          </label>
+
+          <label className="block">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Avatar URL</span>
             <input
               disabled={!isEditing}
@@ -119,6 +157,39 @@ export default function AgentDetailTray({
               <option value="blocked">Blocked</option>
             </select>
           </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">System Prompt</span>
+            <textarea
+              disabled={!isEditing}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              rows={4}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100 disabled:opacity-70"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Character</span>
+            <textarea
+              disabled={!isEditing}
+              value={character}
+              onChange={(e) => setCharacter(e.target.value)}
+              rows={4}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100 disabled:opacity-70"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Lore</span>
+            <textarea
+              disabled={!isEditing}
+              value={lore}
+              onChange={(e) => setLore(e.target.value)}
+              rows={4}
+              className="w-full rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100 disabled:opacity-70"
+            />
+          </label>
         </div>
 
         <div className="flex items-center justify-between gap-2 border-t border-white/10 px-4 py-3">
@@ -126,7 +197,7 @@ export default function AgentDetailTray({
             <>
               <button
                 type="button"
-                onClick={() => setIsEditing(false)}
+                onClick={cancelEdit}
                 className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-400 hover:bg-white/5"
               >
                 Cancel

@@ -3,11 +3,13 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import Markdown from "react-markdown";
 
-function typeAccent(type: "deliverable" | "research" | "spec" | "note") {
+function typeAccent(type: "deliverable" | "research" | "spec" | "note" | "markdown") {
   if (type === "deliverable") return "border-emerald-300/30 bg-emerald-500/15 text-emerald-200";
   if (type === "research") return "border-cyan-300/30 bg-cyan-500/15 text-cyan-200";
   if (type === "spec") return "border-amber-300/30 bg-amber-500/15 text-amber-200";
+  if (type === "markdown") return "border-blue-300/30 bg-blue-500/15 text-blue-200";
   return "border-zinc-300/20 bg-zinc-500/15 text-zinc-200";
 }
 
@@ -20,10 +22,9 @@ export default function DocumentPreviewTray({
   onClose: () => void;
   withConversationOpen: boolean;
 }) {
-  const document = useQuery(api.documents.get, { id: documentId });
-  const task = useQuery(api.tasks.get, document?.taskId ? { id: document.taskId } : "skip");
+  const context = useQuery(api.documents.getWithContext, { id: documentId });
 
-  if (!document) {
+  if (!context) {
     return (
       <aside className="fixed inset-y-0 right-0 z-[96] w-full max-w-lg border-l border-white/10 bg-[linear-gradient(180deg,rgba(10,16,26,0.98),rgba(7,11,18,0.98))] shadow-2xl md:right-[min(100%,24rem)]" />
     );
@@ -39,8 +40,8 @@ export default function DocumentPreviewTray({
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div className="flex items-center gap-2">
             <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-zinc-500">Preview</p>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${typeAccent(document.type)}`}>
-              {document.type}
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${typeAccent(context.type)}`}>
+              {context.type}
             </span>
           </div>
           <button
@@ -53,19 +54,25 @@ export default function DocumentPreviewTray({
         </div>
 
         <div className="border-b border-white/10 px-4 py-3">
-          <h3 className="text-sm font-semibold text-zinc-100">{document.title}</h3>
+          <h3 className="text-sm font-semibold text-zinc-100">{context.title}</h3>
           <p className="mt-1 text-xs text-zinc-500">
-            by {document.createdBy}
-            {task ? ` - task: ${task.title}` : ""}
+            by {context.createdBy}
+            {context.taskTitle ? ` - task: ${context.taskTitle}` : ""}
           </p>
+          {context.path && <p className="mt-1 truncate font-mono text-[11px] text-zinc-600">{context.path}</p>}
         </div>
 
         <div className="flex-1 overflow-y-auto bg-black/25 p-4">
-          {document.type === "spec" || document.type === "note" || document.type === "research" ? (
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">{document.content}</p>
+          {context.type === "spec" ||
+          context.type === "note" ||
+          context.type === "research" ||
+          context.type === "markdown" ? (
+            <div className="markdown-content text-zinc-200">
+              <Markdown>{context.content}</Markdown>
+            </div>
           ) : (
             <pre className="overflow-x-auto rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-zinc-200">
-              <code>{document.content}</code>
+              <code>{context.content}</code>
             </pre>
           )}
         </div>

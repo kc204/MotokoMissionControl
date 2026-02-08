@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import Markdown from "react-markdown";
 
 function timeAgo(ts: number) {
   const delta = Date.now() - ts;
@@ -25,20 +25,9 @@ export default function DocumentConversationTray({
   onClose: () => void;
   onOpenPreview: () => void;
 }) {
-  const document = useQuery(api.documents.get, { id: documentId });
-  const task = useQuery(api.tasks.get, document?.taskId ? { id: document.taskId } : "skip");
-  const messagesQuery = useQuery(
-    api.messages.list,
-    document?.taskId ? { channel: `task:${document.taskId}` } : "skip"
-  );
-  const messages = useMemo(() => messagesQuery ?? [], [messagesQuery]);
+  const context = useQuery(api.documents.getWithContext, { id: documentId });
 
-  const sortedMessages = useMemo(
-    () => [...messages].sort((a, b) => a.createdAt - b.createdAt),
-    [messages]
-  );
-
-  if (!document) {
+  if (!context) {
     return (
       <aside className="fixed inset-y-0 right-0 z-[95] w-full max-w-md border-l border-white/10 bg-[linear-gradient(180deg,rgba(10,16,26,0.98),rgba(7,11,18,0.98))] shadow-2xl" />
     );
@@ -50,7 +39,7 @@ export default function DocumentConversationTray({
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-zinc-500">Context</p>
-            <p className="text-sm text-zinc-200">{document.title}</p>
+            <p className="text-sm text-zinc-200">{context.title}</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -74,34 +63,48 @@ export default function DocumentConversationTray({
           <section className="rounded-xl border border-white/10 bg-black/25 p-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Document Metadata</p>
             <div className="mt-2 space-y-1.5 text-sm text-zinc-300">
-              <p>Type: {document.type}</p>
-              <p>Author: {document.createdBy}</p>
-              <p>Created: {timeAgo(document.createdAt)}</p>
+              <p>Type: {context.type}</p>
+              <p>Author: {context.createdBy}</p>
+              <p>Created: {timeAgo(context.createdAt)}</p>
+              {context.taskTitle && <p>Task: {context.taskTitle}</p>}
             </div>
           </section>
 
-          {task && (
+          {context.taskDescription && (
             <section className="rounded-xl border border-white/10 bg-black/25 p-3">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Prompt</p>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
-                {task.description || "No task prompt captured."}
-              </p>
+              <div className="mt-2 text-sm leading-relaxed text-zinc-200">
+                <div className="markdown-content">
+                  <Markdown>{context.taskDescription}</Markdown>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {context.originMessage && (
+            <section className="rounded-xl border border-white/10 bg-black/25 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Origin Message</p>
+              <div className="mt-2 markdown-content text-sm text-zinc-200">
+                <Markdown>{context.originMessage}</Markdown>
+              </div>
             </section>
           )}
 
           <section className="rounded-xl border border-white/10 bg-black/25 p-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Agent Thread</p>
             <div className="mt-2 space-y-2">
-              {sortedMessages.map((msg) => (
+              {context.conversationMessages.map((msg) => (
                 <div key={msg._id} className="rounded-lg border border-white/10 bg-black/35 px-3 py-2">
                   <div className="mb-1 flex items-center justify-between text-[11px] text-zinc-500">
-                    <span>{msg.agent?.name || (msg.fromUser ? "HQ" : "System")}</span>
+                    <span>{msg.agentName || (msg.fromUser ? "HQ" : "System")}</span>
                     <span>{timeAgo(msg.createdAt)}</span>
                   </div>
-                  <p className="whitespace-pre-wrap text-sm text-zinc-200">{msg.text || msg.content}</p>
+                  <div className="markdown-content text-zinc-200">
+                    <Markdown>{msg.content}</Markdown>
+                  </div>
                 </div>
               ))}
-              {sortedMessages.length === 0 && (
+              {context.conversationMessages.length === 0 && (
                 <p className="text-xs text-zinc-500">No message thread was found for this document.</p>
               )}
             </div>
