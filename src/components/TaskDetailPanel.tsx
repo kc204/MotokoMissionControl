@@ -73,6 +73,7 @@ export default function TaskDetailPanel({
 
   const updateStatus = useMutation(api.tasks.updateStatus);
   const archiveTask = useMutation(api.tasks.archive);
+  const stopDispatch = useMutation(api.tasks.stopDispatch);
   const updateDetails = useMutation(api.tasks.updateDetails);
   const assignTask = useMutation(api.tasks.assign);
   const enqueueDispatch = useMutation(api.tasks.enqueueDispatch);
@@ -90,6 +91,7 @@ export default function TaskDetailPanel({
   const [comment, setComment] = useState("");
   const [dispatchPrompt, setDispatchPrompt] = useState("");
   const [isDispatching, setIsDispatching] = useState(false);
+  const [isStoppingDispatch, setIsStoppingDispatch] = useState(false);
 
   const [docTitle, setDocTitle] = useState("");
   const [docContent, setDocContent] = useState("");
@@ -199,6 +201,18 @@ export default function TaskDetailPanel({
       if (status !== "in_progress") setStatus("in_progress");
     } finally {
       setIsDispatching(false);
+    }
+  };
+
+  const stopCurrentDispatch = async () => {
+    setIsStoppingDispatch(true);
+    try {
+      await stopDispatch({
+        taskId: task._id,
+        reason: "Stopped from task detail panel",
+      });
+    } finally {
+      setIsStoppingDispatch(false);
     }
   };
 
@@ -440,20 +454,37 @@ export default function TaskDetailPanel({
               className="h-16 w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
             />
             <div className="mt-2">
-              <button
-                type="button"
-                onClick={requestDispatch}
-                disabled={isDispatching || dispatchState?.status === "pending" || dispatchState?.status === "running"}
-                className="rounded-lg border border-emerald-300/30 bg-emerald-500/15 px-3 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
-              >
-                {dispatchState?.status === "running"
-                  ? "Running..."
-                  : dispatchState?.status === "pending"
-                  ? "Queued..."
-                  : isDispatching
-                  ? "Queueing..."
-                  : "Run / Resume Task"}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={requestDispatch}
+                  disabled={
+                    isDispatching ||
+                    isStoppingDispatch ||
+                    dispatchState?.status === "pending" ||
+                    dispatchState?.status === "running"
+                  }
+                  className="rounded-lg border border-emerald-300/30 bg-emerald-500/15 px-3 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
+                >
+                  {dispatchState?.status === "running"
+                    ? "Running..."
+                    : dispatchState?.status === "pending"
+                    ? "Queued..."
+                    : isDispatching
+                    ? "Queueing..."
+                    : "Run / Resume Task"}
+                </button>
+                {(dispatchState?.status === "pending" || dispatchState?.status === "running") && (
+                  <button
+                    type="button"
+                    onClick={stopCurrentDispatch}
+                    disabled={isStoppingDispatch}
+                    className="rounded-lg border border-rose-300/30 bg-rose-500/15 px-3 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/25 disabled:opacity-60"
+                  >
+                    {isStoppingDispatch ? "Stopping..." : "Stop Run"}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 

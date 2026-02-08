@@ -165,7 +165,8 @@ export default defineSchema({
       v.literal("pending"),
       v.literal("running"),
       v.literal("completed"),
-      v.literal("failed")
+      v.literal("failed"),
+      v.literal("cancelled")
     ),
     runner: v.optional(v.string()),
     runId: v.optional(v.string()),

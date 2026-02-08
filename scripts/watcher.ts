@@ -65,6 +65,29 @@ function spawnOpenClaw(args: string[]) {
   return spawn(OPENCLAW_BIN, args, { stdio: ["ignore", "pipe", "pipe"], shell: false });
 }
 
+function terminateOpenClawProcess(child: ReturnType<typeof spawnOpenClaw>) {
+  if (IS_WINDOWS && child.pid) {
+    const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      shell: false,
+    });
+    killer.on("error", () => {
+      try {
+        child.kill();
+      } catch {
+        // Best-effort process cleanup.
+      }
+    });
+    return;
+  }
+
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // Best-effort process cleanup.
+  }
+}
+
 async function runOpenClaw(args: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawnOpenClaw(args);
@@ -83,19 +106,60 @@ async function runOpenClaw(args: string[]): Promise<void> {
   });
 }
 
-async function runOpenClawJson<T>(args: string[]): Promise<T> {
+async function runOpenClawJson<T>(
+  args: string[],
+  options?: {
+    shouldCancel?: () => Promise<boolean>;
+    cancelCheckMs?: number;
+  }
+): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const child = spawnOpenClaw(args);
     let stdout = "";
     let stderr = "";
+    let cancelled = false;
+    let settled = false;
+    const cancelCheckMs = Math.max(250, options?.cancelCheckMs ?? 750);
+    const cancelInterval =
+      options?.shouldCancel &&
+      setInterval(async () => {
+        if (settled || cancelled) return;
+        try {
+          const shouldCancel = await options.shouldCancel?.();
+          if (!shouldCancel) return;
+          cancelled = true;
+          terminateOpenClawProcess(child);
+        } catch {
+          // Ignore transient cancellation-check failures.
+        }
+      }, cancelCheckMs);
+
+    const cleanup = () => {
+      if (cancelInterval) {
+        clearInterval(cancelInterval);
+      }
+    };
+
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", (error) => reject(error));
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (cancelled) {
+        reject(new Error("Dispatch cancelled"));
+        return;
+      }
       if (code !== 0) {
         reject(new Error(stderr || `openclaw exited with code ${code}`));
         return;
@@ -489,6 +553,23 @@ async function processTaskDispatchQueue() {
   );
 
   try {
+    const shouldCancelBeforeStart = await client.query(api.tasks.shouldCancelDispatch, {
+      dispatchId: dispatch.dispatchId,
+    });
+    if (shouldCancelBeforeStart) {
+      await client.mutation(api.tasks.updateDispatchStatus, {
+        dispatchId: dispatch.dispatchId,
+        status: "cancelled",
+        error: "Dispatch cancelled before execution",
+      });
+      console.log(
+        `[task_dispatch_completed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} status=cancelled durationMs=${
+          Date.now() - startedAt
+        } reason=preflight`
+      );
+      return;
+    }
+
     const activeAuthProfile = await getActiveAuthProfile();
     await ensureAgentAuthOrder(runtimeAgentId, activeAuthProfile);
 
@@ -507,7 +588,13 @@ async function processTaskDispatchQueue() {
       "--message",
       prompt,
       "--json",
-    ]);
+    ], {
+      shouldCancel: async () =>
+        await client.query(api.tasks.shouldCancelDispatch, {
+          dispatchId: dispatch.dispatchId,
+        }),
+      cancelCheckMs: 750,
+    });
 
     const runId = extractRunId(result);
     const assistantText = extractAssistantText(result);
@@ -523,6 +610,19 @@ async function processTaskDispatchQueue() {
     );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage === "Dispatch cancelled") {
+      await client.mutation(api.tasks.updateDispatchStatus, {
+        dispatchId: dispatch.dispatchId,
+        status: "cancelled",
+        error: errorMessage.slice(0, 1000),
+      });
+      console.log(
+        `[task_dispatch_completed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} status=cancelled durationMs=${
+          Date.now() - startedAt
+        }`
+      );
+      return;
+    }
     await client.mutation(api.tasks.failDispatch, {
       dispatchId: dispatch.dispatchId,
       error: errorMessage.slice(0, 1000),

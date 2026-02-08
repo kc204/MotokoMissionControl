@@ -147,6 +147,7 @@ export const receiveEvent = mutation({
     }
 
     if (!task && args.action !== "document") return;
+    if (task?.status === "archived") return;
 
     if (task) {
       await ctx.db.patch(task._id, {

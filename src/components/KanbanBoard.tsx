@@ -92,6 +92,7 @@ function TaskCard({
   dispatchState,
   onSelect,
   onRun,
+  onStop,
   onArchive,
 }: {
   task: Task;
@@ -100,6 +101,7 @@ function TaskCard({
   dispatchState?: "pending" | "running";
   onSelect?: (id: Id<"tasks">) => void;
   onRun?: (id: Id<"tasks">) => void;
+  onStop?: (id: Id<"tasks">) => void;
   onArchive?: (id: Id<"tasks">) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
@@ -117,6 +119,7 @@ function TaskCard({
   const canRun = task.status !== "archived";
   const runLabel =
     dispatchState === "running" ? "Running..." : dispatchState === "pending" ? "Queued..." : "Run";
+  const hasActiveDispatch = dispatchState === "pending" || dispatchState === "running";
 
   return (
     <div
@@ -176,18 +179,30 @@ function TaskCard({
             Open
           </button>
         )}
-        {canRun && onRun && (
+        {canRun && onRun && !hasActiveDispatch && (
           <button
             type="button"
-            disabled={dispatchState === "pending" || dispatchState === "running"}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               onRun(task._id);
             }}
-            className="rounded-lg border border-emerald-300/30 bg-emerald-500/12 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
+            className="rounded-lg border border-emerald-300/30 bg-emerald-500/12 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
           >
             {runLabel}
+          </button>
+        )}
+        {canRun && onStop && hasActiveDispatch && (
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onStop(task._id);
+            }}
+            className="rounded-lg border border-rose-300/30 bg-rose-500/12 px-2.5 py-1 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/20"
+          >
+            Stop
           </button>
         )}
         {task.status === "done" && onArchive && (
@@ -234,6 +249,7 @@ export default function KanbanBoard({
   );
   const updateStatus = useMutation(api.tasks.updateStatus);
   const archiveTask = useMutation(api.tasks.archive);
+  const stopDispatch = useMutation(api.tasks.stopDispatch);
   const enqueueDispatch = useMutation(api.tasks.enqueueDispatch);
   const [activeId, setActiveId] = useState<Id<"tasks"> | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -275,6 +291,10 @@ export default function KanbanBoard({
 
   const archiveFromBoard = async (taskId: Id<"tasks">) => {
     await archiveTask({ id: taskId });
+  };
+
+  const stopFromBoard = async (taskId: Id<"tasks">) => {
+    await stopDispatch({ taskId, reason: "Stopped from mission board" });
   };
 
   return (
@@ -326,6 +346,7 @@ export default function KanbanBoard({
                         dispatchState={dispatchStateByTask[task._id]}
                         onSelect={onSelectTask}
                         onRun={requestDispatch}
+                        onStop={stopFromBoard}
                         onArchive={archiveFromBoard}
                       />
                     ))}

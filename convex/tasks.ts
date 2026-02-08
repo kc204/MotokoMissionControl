@@ -22,7 +22,8 @@ const dispatchStatus = v.union(
   v.literal("pending"),
   v.literal("running"),
   v.literal("completed"),
-  v.literal("failed")
+  v.literal("failed"),
+  v.literal("cancelled")
 );
 
 function truncate(text: string, max = 240) {
@@ -128,6 +129,18 @@ export const listDispatchStates = query({
   },
 });
 
+export const shouldCancelDispatch = query({
+  args: { dispatchId: v.id("taskDispatches") },
+  handler: async (ctx, args) => {
+    const dispatch = await ctx.db.get(args.dispatchId);
+    if (!dispatch) return true;
+    if (dispatch.status !== "running") return true;
+    const task = await ctx.db.get(dispatch.taskId);
+    if (!task) return true;
+    return task.status === "archived";
+  },
+});
+
 export const updateStatus = mutation({
   args: {
     id: v.id("tasks"),
@@ -171,18 +184,88 @@ export const archive = mutation({
     if (!task) throw new Error("Task not found");
 
     const now = Date.now();
+    const dispatches = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.id))
+      .collect();
+    const activeDispatches = dispatches.filter(
+      (row) => row.status === "pending" || row.status === "running"
+    );
+
     await ctx.db.patch(args.id, {
       status: "archived",
       updatedAt: now,
     });
 
+    for (const dispatch of activeDispatches) {
+      await ctx.db.patch(dispatch._id, {
+        status: "cancelled",
+        error: `Task archived at ${new Date(now).toISOString()}`,
+        finishedAt: now,
+      });
+    }
+
     await ctx.db.insert("activities", {
       type: "task_updated",
       taskId: args.id,
       projectId: task.projectId,
-      message: `Task "${task.title}" archived`,
+      message:
+        activeDispatches.length > 0
+          ? `Task "${task.title}" archived and ${activeDispatches.length} active dispatch(es) cancelled`
+          : `Task "${task.title}" archived`,
       createdAt: now,
     });
+  },
+});
+
+export const stopDispatch = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+
+    const now = Date.now();
+    const dispatches = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+      .collect();
+    const activeDispatches = dispatches.filter(
+      (row) => row.status === "pending" || row.status === "running"
+    );
+
+    if (activeDispatches.length === 0) return { cancelled: 0 };
+
+    const errorMessage =
+      args.reason?.trim() || `Stopped manually at ${new Date(now).toISOString()}`;
+    for (const dispatch of activeDispatches) {
+      await ctx.db.patch(dispatch._id, {
+        status: "cancelled",
+        error: errorMessage,
+        finishedAt: now,
+      });
+    }
+
+    if (task.status === "in_progress") {
+      await ctx.db.patch(task._id, {
+        status: "review",
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.patch(task._id, { updatedAt: now });
+    }
+
+    await ctx.db.insert("activities", {
+      type: "task_updated",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Stopped ${activeDispatches.length} dispatch(es) for "${task.title}"`,
+      createdAt: now,
+    });
+
+    return { cancelled: activeDispatches.length };
   },
 });
 
@@ -367,6 +450,9 @@ export const enqueueDispatch = mutation({
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) throw new Error("Task not found");
+    if (task.status === "archived") {
+      throw new Error("Cannot dispatch an archived task");
+    }
 
     if (args.targetAgentId) {
       const agent = await ctx.db.get(args.targetAgentId);
@@ -424,83 +510,96 @@ export const enqueueDispatch = mutation({
 export const claimNextDispatch = mutation({
   args: { runner: v.string() },
   handler: async (ctx, args) => {
-    const next = await ctx.db
+    const pending = await ctx.db
       .query("taskDispatches")
       .withIndex("by_status_requestedAt", (q) => q.eq("status", "pending"))
-      .first();
-    if (!next) return null;
-
-    const now = Date.now();
-    await ctx.db.patch(next._id, {
-      status: "running",
-      runner: args.runner,
-      startedAt: now,
-      error: undefined,
-    });
-
-    const task = await ctx.db.get(next.taskId);
-    if (!task) {
-      await ctx.db.patch(next._id, {
-        status: "failed",
-        finishedAt: now,
-        error: "Task not found",
-      });
-      return null;
-    }
-
-    let targetAgent =
-      (next.targetAgentId ? await ctx.db.get(next.targetAgentId) : null) ??
-      (task.assigneeIds[0] ? await ctx.db.get(task.assigneeIds[0]) : null);
-
-    if (!targetAgent) {
-      targetAgent =
-        (await ctx.db
-          .query("agents")
-          .withIndex("by_name", (q) => q.eq("name", "Motoko"))
-          .first()) ?? null;
-    }
-
-    if (!targetAgent) {
-      await ctx.db.patch(next._id, {
-        status: "failed",
-        finishedAt: now,
-        error: "No target agent available",
-      });
-      return null;
-    }
-
-    const thread = await ctx.db
-      .query("messages")
-      .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
-      .order("desc")
       .take(20);
-    const threadSorted = [...thread].reverse().map((message) => {
-      const text = extractMessageText(message);
-      return {
-        fromUser: !!message.fromUser,
-        text,
-      };
-    });
+    if (pending.length === 0) return null;
 
-    return {
-      dispatchId: next._id,
-      taskId: task._id,
-      taskTitle: task.title,
-      taskDescription: task.description,
-      taskPriority: task.priority,
-      taskTags: task.tags ?? [],
-      targetAgentId: targetAgent._id,
-      targetAgentName: targetAgent.name,
-      targetSessionKey: targetAgent.sessionKey,
-      targetThinkingModel: targetAgent.models.thinking,
-      targetAgentLevel: targetAgent.level ?? "SPC",
-      targetAgentRole: targetAgent.role,
-      targetAgentSystemPrompt: targetAgent.systemPrompt ?? "",
-      targetAgentCharacter: targetAgent.character ?? "",
-      targetAgentLore: targetAgent.lore ?? "",
-      prompt: next.prompt ?? "",
-      threadMessages: threadSorted,
-    };
+    for (const next of pending) {
+      const now = Date.now();
+      const task = await ctx.db.get(next.taskId);
+      if (!task) {
+        await ctx.db.patch(next._id, {
+          status: "failed",
+          finishedAt: now,
+          error: "Task not found",
+        });
+        continue;
+      }
+      if (task.status === "archived") {
+        await ctx.db.patch(next._id, {
+          status: "cancelled",
+          finishedAt: now,
+          error: "Task archived before dispatch",
+        });
+        continue;
+      }
+
+      await ctx.db.patch(next._id, {
+        status: "running",
+        runner: args.runner,
+        startedAt: now,
+        finishedAt: undefined,
+        error: undefined,
+      });
+
+      let targetAgent =
+        (next.targetAgentId ? await ctx.db.get(next.targetAgentId) : null) ??
+        (task.assigneeIds[0] ? await ctx.db.get(task.assigneeIds[0]) : null);
+
+      if (!targetAgent) {
+        targetAgent =
+          (await ctx.db
+            .query("agents")
+            .withIndex("by_name", (q) => q.eq("name", "Motoko"))
+            .first()) ?? null;
+      }
+
+      if (!targetAgent) {
+        await ctx.db.patch(next._id, {
+          status: "failed",
+          finishedAt: now,
+          error: "No target agent available",
+        });
+        continue;
+      }
+
+      const thread = await ctx.db
+        .query("messages")
+        .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
+        .order("desc")
+        .take(20);
+      const threadSorted = [...thread].reverse().map((message) => {
+        const text = extractMessageText(message);
+        return {
+          fromUser: !!message.fromUser,
+          text,
+        };
+      });
+
+      return {
+        dispatchId: next._id,
+        taskId: task._id,
+        taskTitle: task.title,
+        taskDescription: task.description,
+        taskPriority: task.priority,
+        taskTags: task.tags ?? [],
+        targetAgentId: targetAgent._id,
+        targetAgentName: targetAgent.name,
+        targetSessionKey: targetAgent.sessionKey,
+        targetThinkingModel: targetAgent.models.thinking,
+        targetAgentLevel: targetAgent.level ?? "SPC",
+        targetAgentRole: targetAgent.role,
+        targetAgentSystemPrompt: targetAgent.systemPrompt ?? "",
+        targetAgentCharacter: targetAgent.character ?? "",
+        targetAgentLore: targetAgent.lore ?? "",
+        prompt: next.prompt ?? "",
+        threadMessages: threadSorted,
+      };
+    }
+
+    return null;
   },
 });
 
@@ -513,6 +612,9 @@ export const completeDispatch = mutation({
   handler: async (ctx, args) => {
     const dispatch = await ctx.db.get(args.dispatchId);
     if (!dispatch) throw new Error("Dispatch not found");
+    if (dispatch.status !== "running") {
+      return { ok: false, reason: `dispatch_not_running:${dispatch.status}` };
+    }
     const task = await ctx.db.get(dispatch.taskId);
     if (!task) throw new Error("Task not found");
 
@@ -550,6 +652,9 @@ export const failDispatch = mutation({
   handler: async (ctx, args) => {
     const dispatch = await ctx.db.get(args.dispatchId);
     if (!dispatch) throw new Error("Dispatch not found");
+    if (dispatch.status !== "running") {
+      return { ok: false, reason: `dispatch_not_running:${dispatch.status}` };
+    }
     const task = await ctx.db.get(dispatch.taskId);
     if (!task) throw new Error("Task not found");
 
@@ -561,10 +666,14 @@ export const failDispatch = mutation({
       error,
     });
 
-    await ctx.db.patch(task._id, {
-      status: "review",
-      updatedAt: now,
-    });
+    if (task.status !== "archived") {
+      await ctx.db.patch(task._id, {
+        status: "review",
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.patch(task._id, { updatedAt: now });
+    }
 
     await ctx.db.insert("activities", {
       type: "task_updated",
@@ -600,7 +709,10 @@ export const updateDispatchStatus = mutation({
     await ctx.db.patch(args.dispatchId, {
       status: args.status,
       error: args.error,
-      finishedAt: args.status === "completed" || args.status === "failed" ? now : undefined,
+      finishedAt:
+        args.status === "completed" || args.status === "failed" || args.status === "cancelled"
+          ? now
+          : undefined,
     });
   },
 });
