@@ -1,6 +1,26 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 
+const agentStatus = v.union(v.literal("idle"), v.literal("active"), v.literal("blocked"));
+
+function slugifyAgentId(input: string) {
+  const base = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  return base || "agent";
+}
+
+function sessionRuntimeId(sessionKey: string) {
+  const parts = sessionKey.split(":");
+  if (parts.length >= 2 && parts[0] === "agent" && parts[1]) {
+    return parts[1];
+  }
+  return "main";
+}
+
 export const list = query({
   args: {},
   handler: async (ctx) => {
@@ -35,14 +55,170 @@ export const listByRole = query({
   },
 });
 
+export const createAgent = mutation({
+  args: {
+    name: v.string(),
+    role: v.string(),
+    status: v.optional(agentStatus),
+    avatar: v.optional(v.string()),
+    sessionIdHint: v.optional(v.string()),
+    thinkingModel: v.optional(v.string()),
+    executionModel: v.optional(v.string()),
+    heartbeatModel: v.optional(v.string()),
+    fallbackModel: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const existingByName = await ctx.db
+      .query("agents")
+      .withIndex("by_name", (q) => q.eq("name", args.name))
+      .first();
+    if (existingByName) {
+      throw new Error(`Agent name already exists: ${args.name}`);
+    }
+
+    const allAgents = await ctx.db.query("agents").collect();
+    const usedRuntimeIds = new Set(allAgents.map((agent) => sessionRuntimeId(agent.sessionKey)));
+
+    const requestedId = args.sessionIdHint ? slugifyAgentId(args.sessionIdHint) : slugifyAgentId(args.name);
+    let runtimeId = requestedId;
+    let suffix = 2;
+    while (usedRuntimeIds.has(runtimeId)) {
+      runtimeId = `${requestedId}-${suffix}`;
+      suffix += 1;
+    }
+
+    const now = Date.now();
+    const agentId = await ctx.db.insert("agents", {
+      name: args.name,
+      role: args.role,
+      status: args.status ?? "idle",
+      currentTaskId: undefined,
+      sessionKey: `agent:${runtimeId}:main`,
+      avatar: args.avatar,
+      models: {
+        thinking: args.thinkingModel ?? "google-antigravity/claude-opus-4-5-thinking",
+        execution: args.executionModel,
+        heartbeat: args.heartbeatModel ?? "google/gemini-2.5-flash",
+        fallback: args.fallbackModel ?? "google-antigravity/claude-sonnet-4-5",
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("activities", {
+      type: "agent_status_changed",
+      agentId,
+      message: `Agent created: ${args.name} (${args.role})`,
+      createdAt: now,
+    });
+
+    return agentId;
+  },
+});
+
+export const updateAgent = mutation({
+  args: {
+    id: v.id("agents"),
+    name: v.optional(v.string()),
+    role: v.optional(v.string()),
+    status: v.optional(agentStatus),
+    avatar: v.optional(v.string()),
+    sessionKey: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const agent = await ctx.db.get(args.id);
+    if (!agent) throw new Error("Agent not found");
+
+    if (args.name !== undefined && args.name !== agent.name) {
+      const nextName = args.name;
+      const existing = await ctx.db
+        .query("agents")
+        .withIndex("by_name", (q) => q.eq("name", nextName))
+        .first();
+      if (existing && existing._id !== args.id) {
+        throw new Error(`Agent name already exists: ${nextName}`);
+      }
+    }
+
+    const patch: {
+      name?: string;
+      role?: string;
+      status?: "idle" | "active" | "blocked";
+      avatar?: string;
+      sessionKey?: string;
+      updatedAt: number;
+    } = {
+      updatedAt: Date.now(),
+    };
+
+    if (args.name !== undefined) patch.name = args.name;
+    if (args.role !== undefined) patch.role = args.role;
+    if (args.status !== undefined) patch.status = args.status;
+    if (args.avatar !== undefined) patch.avatar = args.avatar;
+    if (args.sessionKey !== undefined) patch.sessionKey = args.sessionKey;
+
+    await ctx.db.patch(args.id, patch);
+  },
+});
+
+export const deleteAgent = mutation({
+  args: { id: v.id("agents") },
+  handler: async (ctx, args) => {
+    const agent = await ctx.db.get(args.id);
+    if (!agent) throw new Error("Agent not found");
+
+    const tasks = await ctx.db.query("tasks").collect();
+    for (const task of tasks) {
+      if (!task.assigneeIds.includes(args.id)) continue;
+      const nextAssignees = task.assigneeIds.filter((assigneeId) => assigneeId !== args.id);
+      await ctx.db.patch(task._id, {
+        assigneeIds: nextAssignees,
+        status: nextAssignees.length === 0 && task.status === "assigned" ? "inbox" : task.status,
+        updatedAt: Date.now(),
+      });
+    }
+
+    const subs = await ctx.db
+      .query("taskSubscriptions")
+      .withIndex("by_agentId", (q) => q.eq("agentId", args.id))
+      .collect();
+    for (const sub of subs) {
+      await ctx.db.delete(sub._id);
+    }
+
+    const notes = await ctx.db
+      .query("notifications")
+      .withIndex("by_targetAgentId", (q) => q.eq("targetAgentId", args.id))
+      .collect();
+    for (const note of notes) {
+      await ctx.db.delete(note._id);
+    }
+
+    const assignments = await ctx.db
+      .query("assignments")
+      .withIndex("by_agentId", (q) => q.eq("agentId", args.id))
+      .collect();
+    for (const row of assignments) {
+      await ctx.db.patch(row._id, {
+        active: false,
+        unassignedAt: Date.now(),
+      });
+    }
+
+    await ctx.db.insert("activities", {
+      type: "agent_status_changed",
+      message: `Agent deleted: ${agent.name}`,
+      createdAt: Date.now(),
+    });
+
+    await ctx.db.delete(args.id);
+  },
+});
+
 export const updateStatus = mutation({
   args: {
     id: v.id("agents"),
-    status: v.union(
-      v.literal("idle"),
-      v.literal("active"),
-      v.literal("blocked")
-    ),
+    status: agentStatus,
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {

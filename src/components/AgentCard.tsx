@@ -17,6 +17,7 @@ interface AgentCardProps {
     heartbeat: string;
     fallback: string;
   };
+  onOpenDetails?: (id: Id<"agents">) => void;
 }
 
 const statusStyles = {
@@ -32,6 +33,7 @@ export default function AgentCard({
   status,
   currentTaskId,
   models,
+  onOpenDetails,
 }: AgentCardProps) {
   const currentTask = useQuery(api.tasks.get, currentTaskId ? { id: currentTaskId } : "skip");
   const availableModels = useQuery(api.models.list) || [];
@@ -116,7 +118,18 @@ export default function AgentCard({
           <span className={`h-2 w-2 rounded-full ${status === "active" ? "bg-emerald-400" : "bg-zinc-600"}`} />
           {status === "active" ? "Online" : "Offline"}
         </p>
-        <p className="font-mono text-xs text-zinc-600">ID: {id.slice(-4)}</p>
+        <div className="flex items-center gap-2">
+          <p className="font-mono text-xs text-zinc-600">ID: {id.slice(-4)}</p>
+          {onOpenDetails && (
+            <button
+              type="button"
+              onClick={() => onOpenDetails(id)}
+              className="rounded-lg border border-cyan-300/30 bg-cyan-500/15 px-2 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/25"
+            >
+              Details
+            </button>
+          )}
+        </div>
       </footer>
     </article>
   );

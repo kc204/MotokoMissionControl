@@ -198,3 +198,36 @@ export const assign = mutation({
     }
   },
 });
+
+export const updateDetails = mutation({
+  args: {
+    id: v.id("tasks"),
+    title: v.optional(v.string()),
+    description: v.optional(v.string()),
+    priority: v.optional(taskPriority),
+  },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.id);
+    if (!task) throw new Error("Task not found");
+
+    const patch: {
+      title?: string;
+      description?: string;
+      priority?: "low" | "medium" | "high" | "urgent";
+      updatedAt: number;
+    } = { updatedAt: Date.now() };
+
+    if (args.title !== undefined) patch.title = args.title;
+    if (args.description !== undefined) patch.description = args.description;
+    if (args.priority !== undefined) patch.priority = args.priority;
+
+    await ctx.db.patch(args.id, patch);
+    await ctx.db.insert("activities", {
+      type: "task_updated",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Task "${task.title}" details updated`,
+      createdAt: Date.now(),
+    });
+  },
+});

@@ -36,3 +36,30 @@ export const forAgent = query({
       .take(take);
   },
 });
+
+export const listFiltered = query({
+  args: {
+    limit: v.optional(v.number()),
+    type: v.optional(
+      v.union(
+        v.literal("task_created"),
+        v.literal("task_updated"),
+        v.literal("message_sent"),
+        v.literal("agent_status_changed"),
+        v.literal("document_created")
+      )
+    ),
+    agentId: v.optional(v.id("agents")),
+  },
+  handler: async (ctx, args) => {
+    const take = Math.max(1, Math.min(args.limit ?? 80, 200));
+    let rows = await ctx.db.query("activities").withIndex("by_createdAt").order("desc").take(take);
+    if (args.type) {
+      rows = rows.filter((row) => row.type === args.type);
+    }
+    if (args.agentId) {
+      rows = rows.filter((row) => row.agentId === args.agentId);
+    }
+    return rows;
+  },
+});

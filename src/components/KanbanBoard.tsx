@@ -52,7 +52,13 @@ function priorityClass(priority: Task["priority"]) {
   return "border-zinc-500/40 bg-zinc-500/15 text-zinc-300";
 }
 
-function TaskCard({ task }: { task: Task }) {
+function TaskCard({
+  task,
+  onSelect,
+}: {
+  task: Task;
+  onSelect?: (id: Id<"tasks">) => void;
+}) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
     id: task._id,
     data: { ...task },
@@ -83,12 +89,26 @@ function TaskCard({ task }: { task: Task }) {
       <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-400">
         {task.description || "No description"}
       </p>
+      {onSelect && (
+        <button
+          type="button"
+          onClick={() => onSelect(task._id)}
+          className="mt-2 rounded-lg border border-cyan-300/30 bg-cyan-500/12 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20"
+        >
+          Open
+        </button>
+      )}
     </div>
   );
 }
 
-export default function KanbanBoard() {
-  const tasks = useQuery(api.tasks.list) || [];
+export default function KanbanBoard({
+  onSelectTask,
+}: {
+  onSelectTask?: (id: Id<"tasks">) => void;
+}) {
+  const tasksQuery = useQuery(api.tasks.list);
+  const tasks = useMemo(() => tasksQuery ?? [], [tasksQuery]);
   const updateStatus = useMutation(api.tasks.updateStatus);
   const [activeId, setActiveId] = useState<Id<"tasks"> | null>(null);
 
@@ -144,7 +164,7 @@ export default function KanbanBoard() {
                       </div>
                     )}
                     {columnTasks.map((task) => (
-                      <TaskCard key={task._id} task={task} />
+                      <TaskCard key={task._id} task={task} onSelect={onSelectTask} />
                     ))}
                   </div>
                 </SortableContext>

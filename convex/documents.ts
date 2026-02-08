@@ -12,6 +12,31 @@ export const byTask = query({
   },
 });
 
+export const listAll = query({
+  args: {
+    type: v.optional(
+      v.union(
+        v.literal("deliverable"),
+        v.literal("research"),
+        v.literal("spec"),
+        v.literal("note")
+      )
+    ),
+  },
+  handler: async (ctx, args) => {
+    const docs = await ctx.db.query("documents").withIndex("by_createdAt").order("desc").collect();
+    if (!args.type) return docs;
+    return docs.filter((doc) => doc.type === args.type);
+  },
+});
+
+export const get = query({
+  args: { id: v.id("documents") },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.id);
+  },
+});
+
 export const create = mutation({
   args: {
     title: v.string(),

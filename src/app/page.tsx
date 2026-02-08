@@ -3,10 +3,16 @@
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import AgentCard from "@/components/AgentCard";
+import AddAgentModal from "@/components/AddAgentModal";
+import AgentDetailTray from "@/components/AgentDetailTray";
+import { useState } from "react";
+import type { Id } from "../../convex/_generated/dataModel";
 
 export default function Home() {
   const agents = useQuery(api.agents.list) || [];
   const activeCount = agents.filter((a) => a.status === "active").length;
+  const [showAddAgentModal, setShowAddAgentModal] = useState(false);
+  const [selectedAgentId, setSelectedAgentId] = useState<Id<"agents"> | null>(null);
 
   return (
     <main className="relative min-h-[calc(100vh-7rem)] text-white">
@@ -38,15 +44,35 @@ export default function Home() {
             status={agent.status}
             currentTaskId={agent.currentTaskId}
             models={agent.models}
+            onOpenDetails={setSelectedAgentId}
           />
         ))}
 
-        <button className="group flex min-h-[365px] items-center justify-center rounded-3xl border border-dashed border-white/15 bg-gradient-to-br from-white/[0.02] to-white/[0.01] transition-colors hover:border-white/25 hover:from-white/[0.04] hover:to-white/[0.02]">
+        <button
+          type="button"
+          onClick={() => setShowAddAgentModal(true)}
+          className="group flex min-h-[365px] items-center justify-center rounded-3xl border border-dashed border-white/15 bg-gradient-to-br from-white/[0.02] to-white/[0.01] transition-colors hover:border-white/25 hover:from-white/[0.04] hover:to-white/[0.02]"
+        >
           <span className="text-sm font-medium tracking-wide text-zinc-400 transition-colors group-hover:text-zinc-200">
             Deploy New Agent
           </span>
         </button>
       </section>
+
+      <AddAgentModal
+        isOpen={showAddAgentModal}
+        onClose={() => setShowAddAgentModal(false)}
+      />
+      {selectedAgentId && (
+        <>
+          <div
+            className="fixed inset-0 z-[84] bg-black/60 backdrop-blur-[1px]"
+            onClick={() => setSelectedAgentId(null)}
+            aria-hidden="true"
+          />
+          <AgentDetailTray agentId={selectedAgentId} onClose={() => setSelectedAgentId(null)} />
+        </>
+      )}
     </main>
   );
 }
