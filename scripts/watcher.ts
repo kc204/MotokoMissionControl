@@ -15,20 +15,33 @@ const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : 
 const POLL_MS = Number(process.env.WATCHER_POLL_MS || 1000);
 const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 60000);
 const AUTH_SYNC_MS = Number(process.env.WATCHER_AUTH_SYNC_MS || 30000);
+const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
+const WATCHER_LEASE_KEY = "watcher:leader";
+const WATCHER_LAST_SEEN_USER_MESSAGE_KEY = "watcher:last_seen_hq_user_message_id";
+const WATCHER_LEASE_TTL_MS = Number(process.env.WATCHER_LEASE_TTL_MS || 8000);
+const WATCHER_LEASE_RENEW_MS = Number(
+  process.env.WATCHER_LEASE_RENEW_MS || Math.max(1000, Math.floor(WATCHER_LEASE_TTL_MS / 2))
+);
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const missionControlRoot = resolveMissionControlRoot();
 const tsxCliPath = path.join(missionControlRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const orchestratorScriptPath = resolveScriptPath("orchestrator.ts");
+const watcherInstanceId = `${os.hostname()}:${process.pid}`;
 
 const client = new ConvexHttpClient(convexUrl);
 const modelCache = new Map<string, string>();
 let activeAuthProfile: string | null = null;
 let orchestratorBusy = false;
+let isLeader = false;
+let lastLeaseCheckAt = 0;
 let lastModelSyncAt = 0;
 let lastAuthSyncAt = 0;
 let lastSeenUserMessageId: string | null = null;
+let hasLoadedLastSeenUserMessageId = false;
 let lastManualDispatchToken: string | null = null;
+let lastAutomationRefreshAt = 0;
+let autoDispatchEnabled = true;
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -82,6 +95,68 @@ async function runOpenClawJson<T>(args: string[]): Promise<T> {
       }
     });
   });
+}
+
+async function refreshAutomationConfig(now: number) {
+  if (now - lastAutomationRefreshAt < AUTOMATION_REFRESH_MS) return;
+  lastAutomationRefreshAt = now;
+  try {
+    const config = await client.query(api.settings.getAutomationConfig);
+    autoDispatchEnabled = config.autoDispatchEnabled;
+  } catch (error) {
+    console.error("[automation] failed to load config, using previous values:", error);
+  }
+}
+
+async function ensureLeadership(now: number) {
+  if (now - lastLeaseCheckAt < WATCHER_LEASE_RENEW_MS) return isLeader;
+  lastLeaseCheckAt = now;
+  try {
+    const lease = await client.mutation(api.settings.acquireLease, {
+      key: WATCHER_LEASE_KEY,
+      owner: watcherInstanceId,
+      ttlMs: WATCHER_LEASE_TTL_MS,
+    });
+    const nextLeader = lease.acquired;
+    if (nextLeader !== isLeader) {
+      console.log(
+        nextLeader
+          ? `[leader] acquired by ${watcherInstanceId}`
+          : `[leader] standby; active owner=${lease.owner ?? "unknown"}`
+      );
+    }
+    isLeader = nextLeader;
+  } catch (error) {
+    if (isLeader) {
+      console.error("[leader] lease renewal failed, entering standby:", error);
+    }
+    isLeader = false;
+  }
+  return isLeader;
+}
+
+async function releaseLeadership() {
+  if (!isLeader) return;
+  try {
+    await client.mutation(api.settings.releaseLease, {
+      key: WATCHER_LEASE_KEY,
+      owner: watcherInstanceId,
+    });
+  } catch (error) {
+    console.error("[leader] release failed:", error);
+  }
+}
+
+async function loadLastSeenUserMessageId() {
+  if (hasLoadedLastSeenUserMessageId) return;
+  hasLoadedLastSeenUserMessageId = true;
+  try {
+    const row = await client.query(api.settings.get, { key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY });
+    lastSeenUserMessageId = typeof row?.value === "string" ? row.value : null;
+  } catch (error) {
+    console.error("[dispatch] failed to load persisted dedupe pointer:", error);
+    lastSeenUserMessageId = null;
+  }
 }
 
 function agentIdFromSessionKey(sessionKey: string): string {
@@ -232,15 +307,21 @@ async function triggerOrchestrator(messageId?: string) {
 }
 
 async function checkAndDispatchNewUserMessage() {
+  await loadLastSeenUserMessageId();
+
   const messages = await client.query(api.messages.list, { channel: "hq" });
   if (messages.length === 0) return;
   const newestUserMessage = [...messages].reverse().find((m) => !m.agentId);
   if (!newestUserMessage) return;
   if (newestUserMessage._id === lastSeenUserMessageId) return;
 
-  lastSeenUserMessageId = newestUserMessage._id;
   console.log(`[dispatch] new HQ user message ${newestUserMessage._id}`);
   await triggerOrchestrator(newestUserMessage._id);
+  lastSeenUserMessageId = newestUserMessage._id;
+  await client.mutation(api.settings.set, {
+    key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
+    value: newestUserMessage._id,
+  });
 }
 
 async function checkManualDispatchRequest() {
@@ -256,23 +337,32 @@ async function checkManualDispatchRequest() {
 }
 
 async function tick() {
-  await checkAndDispatchNewUserMessage();
+  const now = Date.now();
+  await refreshAutomationConfig(now);
+  const leader = await ensureLeadership(now);
+  if (!leader) return;
+
+  if (autoDispatchEnabled) {
+    await checkAndDispatchNewUserMessage();
+  }
   await checkManualDispatchRequest();
 
-  const now = Date.now();
-  if (now - lastModelSyncAt >= MODEL_SYNC_MS) {
+  const syncNow = Date.now();
+  if (syncNow - lastModelSyncAt >= MODEL_SYNC_MS) {
     await syncModels();
-    lastModelSyncAt = now;
+    lastModelSyncAt = syncNow;
   }
 
-  if (now - lastAuthSyncAt >= AUTH_SYNC_MS) {
+  if (syncNow - lastAuthSyncAt >= AUTH_SYNC_MS) {
     await syncAuthProfile();
-    lastAuthSyncAt = now;
+    lastAuthSyncAt = syncNow;
   }
 }
 
 async function main() {
-  console.log(`Watcher active. poll=${POLL_MS}ms root=${missionControlRoot}`);
+  console.log(
+    `Watcher active. poll=${POLL_MS}ms root=${missionControlRoot} instance=${watcherInstanceId}`
+  );
   while (true) {
     try {
       await tick();
@@ -293,7 +383,23 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+let shuttingDown = false;
+async function shutdown(code: number) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await releaseLeadership();
+  process.exit(code);
+}
+
+process.on("SIGINT", () => {
+  void shutdown(0);
+});
+process.on("SIGTERM", () => {
+  void shutdown(0);
+});
+
+main().catch(async (error) => {
   console.error("Watcher fatal:", error);
+  await releaseLeadership();
   process.exit(1);
 });

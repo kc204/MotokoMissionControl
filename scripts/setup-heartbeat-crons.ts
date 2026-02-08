@@ -5,6 +5,10 @@ import { buildTsxCommand } from "./lib/mission-control";
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const TIMEZONE = process.env.HEARTBEAT_TZ || "UTC";
+const HEARTBEAT_INTERVAL_MINUTES = Math.max(
+  15,
+  Number(process.env.HEARTBEAT_INTERVAL_MINUTES || 30)
+);
 
 type Job = {
   id: string;
@@ -75,8 +79,8 @@ async function runOpenClaw(args: string[]): Promise<void> {
 }
 
 function cronExpr(offset: number): string {
-  if (offset === 0) return "*/15 * * * *";
-  return `${offset}-59/15 * * * *`;
+  if (offset === 0) return `*/${HEARTBEAT_INTERVAL_MINUTES} * * * *`;
+  return `${offset}-59/${HEARTBEAT_INTERVAL_MINUTES} * * * *`;
 }
 
 function heartbeatMessage(agentId: string) {

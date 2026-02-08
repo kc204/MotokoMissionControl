@@ -15,10 +15,15 @@ const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN =
   process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const POLL_INTERVAL_MS = Number(process.env.NOTIFICATION_POLL_MS || 2000);
-const BATCH_SIZE = Number(process.env.NOTIFICATION_BATCH_SIZE || 50);
+const DEFAULT_BATCH_SIZE = Number(process.env.NOTIFICATION_BATCH_SIZE || 10);
+const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
 const RUN_ONCE = process.env.RUN_ONCE === "1";
 
 const client = new ConvexHttpClient(convexUrl);
+let lastAutomationRefreshAt = 0;
+let notificationDeliveryEnabled = true;
+let notificationBatchSize = Math.max(1, DEFAULT_BATCH_SIZE);
+let lastDeliveryDisabledLogAt = 0;
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -64,8 +69,8 @@ async function sendToOpenClaw(
   });
 }
 
-async function runOpenClawJson(args: string[]): Promise<any> {
-  return await new Promise((resolve, reject) => {
+async function runOpenClawJson<T>(args: string[]): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
     const child = spawnOpenClaw(args);
     let stdout = "";
     let stderr = "";
@@ -82,7 +87,7 @@ async function runOpenClawJson(args: string[]): Promise<any> {
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        resolve(JSON.parse(stdout) as T);
       } catch {
         reject(new Error(`Failed to parse JSON from openclaw: ${stdout || stderr}`));
       }
@@ -93,7 +98,10 @@ async function runOpenClawJson(args: string[]): Promise<any> {
 async function getSessionMap(): Promise<Map<string, string>> {
   const sessionMap = new Map<string, string>();
   try {
-    const data = await runOpenClawJson(["sessions", "--json"]);
+    const data = await runOpenClawJson<{ sessions?: Array<{ key?: string; sessionId?: string }> }>([
+      "sessions",
+      "--json",
+    ]);
     const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
     for (const session of sessions) {
       if (session?.key && session?.sessionId) {
@@ -106,6 +114,25 @@ async function getSessionMap(): Promise<Map<string, string>> {
   }
 }
 
+function trimDeliveryMessage(message: string, maxChars = 320): string {
+  const compact = message.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+async function refreshAutomationConfig(now: number) {
+  if (now - lastAutomationRefreshAt < AUTOMATION_REFRESH_MS) return;
+  lastAutomationRefreshAt = now;
+
+  try {
+    const config = await client.query(api.settings.getAutomationConfig);
+    notificationDeliveryEnabled = config.notificationDeliveryEnabled;
+    notificationBatchSize = Math.max(1, config.notificationBatchSize);
+  } catch (error) {
+    console.error("[automation] failed to load config, using previous notification settings:", error);
+  }
+}
+
 function resolveAgentId(sessionKey: string): string {
   const parts = sessionKey.split(":");
   if (parts.length >= 2 && parts[0] === "agent" && parts[1]) {
@@ -115,11 +142,23 @@ function resolveAgentId(sessionKey: string): string {
 }
 
 async function runOnce() {
+  const now = Date.now();
+  await refreshAutomationConfig(now);
+  if (!notificationDeliveryEnabled) {
+    if (now - lastDeliveryDisabledLogAt >= 30000) {
+      console.log("[poll] notification delivery disabled by automation config");
+      lastDeliveryDisabledLogAt = now;
+    }
+    return;
+  }
+
   const sessionMap = await getSessionMap();
   const undelivered = await client.query(api.notifications.getUndelivered, {
-    limit: BATCH_SIZE,
+    limit: notificationBatchSize,
   });
-  console.log(`[poll] undelivered=${undelivered.length} sessions=${sessionMap.size}`);
+  console.log(
+    `[poll] undelivered=${undelivered.length} sessions=${sessionMap.size} batch=${notificationBatchSize}`
+  );
   if (undelivered.length === 0) return;
 
   for (const notification of undelivered) {
@@ -133,10 +172,11 @@ async function runOnce() {
     }
 
     try {
-      await sendToOpenClaw(agent.sessionKey, notification.content, sessionMap);
+      const deliveryMessage = trimDeliveryMessage(notification.content);
+      await sendToOpenClaw(agent.sessionKey, deliveryMessage, sessionMap);
       await client.mutation(api.notifications.markDelivered, { id: notification._id });
       console.log(
-        `[delivered] ${agent.name} (${agent.sessionKey}) <- ${notification.content.slice(0, 80)}`
+        `[delivered] ${agent.name} (${agent.sessionKey}) <- ${deliveryMessage.slice(0, 80)}`
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

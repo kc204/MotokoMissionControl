@@ -8,6 +8,7 @@ const links = [
   { href: "/", label: "Agents" },
   { href: "/kanban", label: "Kanban" },
   { href: "/hq", label: "HQ Chat" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export default function TopNav() {
@@ -21,7 +22,7 @@ export default function TopNav() {
         </div>
         <nav className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-1">
           {links.map((link) => {
-            const active = pathname === link.href;
+            const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
             return (
               <Link
                 key={link.href}

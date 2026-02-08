@@ -13,6 +13,13 @@ const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const client = new ConvexHttpClient(convexUrl);
 const reportScriptCommand = buildTsxCommand("report.ts");
+const DEFAULT_HEARTBEAT_CONFIG = {
+  heartbeatEnabled: true,
+  heartbeatMaxNotifications: 3,
+  heartbeatMaxTasks: 3,
+  heartbeatMaxActivities: 4,
+  heartbeatRequireChatUpdate: false,
+};
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -45,22 +52,37 @@ function sessionKeyFromAgentId(agentId: string) {
   return `agent:${agentId}:main`;
 }
 
-function formatTasks(tasks: Array<{ title: string; status: string; priority: string }>) {
+function formatTasks(tasks: Array<{ title: string; status: string; priority: string }>, limit: number) {
   if (tasks.length === 0) return "- none";
   return tasks
-    .slice(0, 8)
+    .slice(0, limit)
     .map((t, i) => `${i + 1}. [${t.status}|${t.priority}] ${t.title}`)
     .join("\n");
 }
 
-function formatNotifications(notifications: Array<{ content: string }>) {
+function formatNotifications(notifications: Array<{ content: string }>, limit: number) {
   if (notifications.length === 0) return "- none";
-  return notifications.slice(0, 10).map((n, i) => `${i + 1}. ${n.content}`).join("\n");
+  return notifications.slice(0, limit).map((n, i) => `${i + 1}. ${n.content}`).join("\n");
 }
 
-function formatActivity(activities: Array<{ message: string }>) {
+function formatActivity(activities: Array<{ message: string }>, limit: number) {
   if (activities.length === 0) return "- none";
-  return activities.slice(0, 12).map((a, i) => `${i + 1}. ${a.message}`).join("\n");
+  return activities.slice(0, limit).map((a, i) => `${i + 1}. ${a.message}`).join("\n");
+}
+
+async function getHeartbeatConfig() {
+  try {
+    const config = await client.query(api.settings.getAutomationConfig);
+    return {
+      heartbeatEnabled: config.heartbeatEnabled,
+      heartbeatMaxNotifications: config.heartbeatMaxNotifications,
+      heartbeatMaxTasks: config.heartbeatMaxTasks,
+      heartbeatMaxActivities: config.heartbeatMaxActivities,
+      heartbeatRequireChatUpdate: config.heartbeatRequireChatUpdate,
+    };
+  } catch {
+    return { ...DEFAULT_HEARTBEAT_CONFIG };
+  }
 }
 
 async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> {
@@ -83,6 +105,12 @@ async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> 
 
 async function main() {
   const { agent: openclawAgentId } = parseArgs();
+  const heartbeatConfig = await getHeartbeatConfig();
+  if (!heartbeatConfig.heartbeatEnabled) {
+    console.log(`[heartbeat] disabled by automation config for ${openclawAgentId}`);
+    return;
+  }
+
   const expectedSessionKey = sessionKeyFromAgentId(openclawAgentId);
   const agents = await client.query(api.agents.list);
   const convexAgent =
@@ -99,7 +127,8 @@ async function main() {
   });
   const assignedTasks = await client.query(api.tasks.getAssigned, { agentId: convexAgent._id });
   const activeTasks = assignedTasks.filter((t) => t.status !== "done");
-  const activities = await client.query(api.activities.recent, { limit: 25 });
+  const activityLimit = Math.max(8, heartbeatConfig.heartbeatMaxActivities * 2);
+  const activities = await client.query(api.activities.recent, { limit: activityLimit });
 
   if (pendingNotifications.length === 0 && activeTasks.length === 0) {
     await client.mutation(api.agents.updateStatus, {
@@ -113,12 +142,21 @@ async function main() {
 
   const prompt = [
     `You are ${convexAgent.name} (${convexAgent.role}) on scheduled Mission Control heartbeat.`,
-    `Pending notifications: ${formatNotifications(pendingNotifications).replace(/\s+/g, " ").trim()}.`,
-    `Assigned tasks: ${formatTasks(activeTasks).replace(/\s+/g, " ").trim()}.`,
-    `Recent team activity: ${formatActivity(activities).replace(/\s+/g, " ").trim()}.`,
+    `Pending notifications: ${formatNotifications(
+      pendingNotifications,
+      heartbeatConfig.heartbeatMaxNotifications
+    ).replace(/\s+/g, " ").trim()}.`,
+    `Assigned tasks: ${formatTasks(activeTasks, heartbeatConfig.heartbeatMaxTasks)
+      .replace(/\s+/g, " ")
+      .trim()}.`,
+    `Recent team activity: ${formatActivity(activities, heartbeatConfig.heartbeatMaxActivities)
+      .replace(/\s+/g, " ")
+      .trim()}.`,
     `Protocol: (1) ${reportScriptCommand} heartbeat ${convexAgent.name} active "Processing heartbeat work";`,
     "(2) work relevant items;",
-    `(3) post at least one concrete update via ${reportScriptCommand} chat ${convexAgent.name} "<update>";`,
+    heartbeatConfig.heartbeatRequireChatUpdate
+      ? `(3) post at least one concrete update via ${reportScriptCommand} chat ${convexAgent.name} "<update>";`
+      : `(3) post a chat update only if you completed meaningful work; otherwise skip chat output;`,
     `if needed update tasks via Convex CLI;`,
     `(4) finish with ${reportScriptCommand} heartbeat ${convexAgent.name} idle "Heartbeat complete".`,
     "Do not output NO_REPLY. If blocked, state blocker and owner. If report command fails, include full error and retry once.",
