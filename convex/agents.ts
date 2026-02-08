@@ -5,6 +5,7 @@ import { v } from "convex/values";
 const agentStatus = v.union(v.literal("idle"), v.literal("active"), v.literal("blocked"));
 const agentLevel = v.union(v.literal("LEAD"), v.literal("INT"), v.literal("SPC"));
 const OPENCLAW_AVAILABLE_MODELS_KEY = "openclaw:models:available";
+const STATUS_ACTIVITY_DEDUP_MS = 5 * 60 * 1000;
 
 function inferLevelFromRole(role: string) {
   const normalized = role.toLowerCase();
@@ -313,25 +314,43 @@ export const updateStatus = mutation({
     const { id, status, message } = args;
     const agent = await ctx.db.get(id);
     if (!agent) throw new Error("Agent not found");
+    const now = Date.now();
+    const normalizedMessage = message?.trim();
+    const activityMessage = `${agent.name} status changed to ${status}${
+      normalizedMessage ? ` (${normalizedMessage})` : ""
+    }`;
 
     await ctx.db.patch(id, {
       status,
-      updatedAt: Date.now(),
+      updatedAt: now,
     });
 
     await ctx.db.insert("heartbeats", {
       agentId: id,
       status: status === "active" ? "working" : "ok",
-      message,
-      createdAt: Date.now(),
+      message: normalizedMessage,
+      createdAt: now,
     });
 
-    await ctx.db.insert("activities", {
-      type: "agent_status_changed",
-      agentId: id,
-      message: `${agent.name} status changed to ${status}${message ? ` (${message})` : ""}`,
-      createdAt: Date.now(),
-    });
+    const recentStatusActivity = await ctx.db
+      .query("activities")
+      .withIndex("by_agentId", (q) => q.eq("agentId", id))
+      .order("desc")
+      .first();
+
+    const isDuplicateStatusActivity =
+      recentStatusActivity?.type === "agent_status_changed" &&
+      recentStatusActivity.message === activityMessage &&
+      now - recentStatusActivity.createdAt < STATUS_ACTIVITY_DEDUP_MS;
+
+    if (!isDuplicateStatusActivity) {
+      await ctx.db.insert("activities", {
+        type: "agent_status_changed",
+        agentId: id,
+        message: activityMessage,
+        createdAt: now,
+      });
+    }
   },
 });
 
