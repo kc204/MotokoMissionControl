@@ -8,7 +8,19 @@ export default function ConvexClientProvider({
 }: {
   children: ReactNode;
 }) {
-  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+  const rawConvexUrl = process.env.NEXT_PUBLIC_CONVEX_URL?.trim();
+  const convexUrl = useMemo(() => {
+    if (!rawConvexUrl) return null;
+    try {
+      const parsed = new URL(rawConvexUrl);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return null;
+      }
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }, [rawConvexUrl]);
   const convex = useMemo(
     () => (convexUrl ? new ConvexReactClient(convexUrl) : null),
     [convexUrl]
