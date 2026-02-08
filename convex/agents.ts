@@ -14,7 +14,7 @@ function inferLevelFromRole(role: string) {
 function normalizeModelName(modelName?: string) {
   if (!modelName) return modelName;
   const trimmed = modelName.trim();
-  if (trimmed === "codex-cli") return "anthropic/codex-cli";
+  if (trimmed === "anthropic/codex-cli") return "codex-cli";
   return trimmed;
 }
 

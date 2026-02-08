@@ -171,6 +171,11 @@ export default defineSchema({
     runner: v.optional(v.string()),
     runId: v.optional(v.string()),
     resultPreview: v.optional(v.string()),
+    verificationStatus: v.optional(
+      v.union(v.literal("pass"), v.literal("fail"), v.literal("not_run"), v.literal("unknown"))
+    ),
+    verificationSummary: v.optional(v.string()),
+    verificationCommand: v.optional(v.string()),
     error: v.optional(v.string()),
     requestedAt: v.number(),
     startedAt: v.optional(v.number()),

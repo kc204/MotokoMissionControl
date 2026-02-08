@@ -33,6 +33,12 @@ const WATCHER_LEASE_RENEW_MS = Number(
 );
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
+const WATCHER_MESSAGE_RETRY_STATE_KEY = "watcher:message_retry_state";
+const WATCHER_MESSAGE_MAX_RETRIES = Math.max(1, Number(process.env.WATCHER_MESSAGE_MAX_RETRIES || 3));
+const WATCHER_MESSAGE_RETRY_STATE_LIMIT = Math.max(
+  50,
+  Number(process.env.WATCHER_MESSAGE_RETRY_STATE_LIMIT || 300)
+);
 const TASK_HQ_COLLAB_ENABLED = process.env.TASK_HQ_COLLAB_ENABLED !== "false";
 const WATCHER_FAILOVER_ENABLED = process.env.WATCHER_FAILOVER_ENABLED !== "false";
 const parsedTaskHqMinSpecialists = Number(process.env.TASK_HQ_COLLAB_MIN_SPECIALISTS || 2);
@@ -66,6 +72,10 @@ let lastManualDispatchToken: string | null = null;
 let lastAutomationRefreshAt = 0;
 let autoDispatchEnabled = true;
 let authProfileDiscoverySignature: string | null = null;
+let hasLoadedRetryState = false;
+let retryStateByMessageId: Record<string, { attempts: number; lastError: string; updatedAt: number }> = {};
+let availableModelIds = new Set<string>();
+let hasLoadedModelCatalog = false;
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -251,6 +261,156 @@ function agentIdFromSessionKey(sessionKey: string): string {
   const parts = sessionKey.split(":");
   if (parts.length >= 2 && parts[0] === "agent") return parts[1];
   return "main";
+}
+
+function isPermanentDispatchError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("unknown model") ||
+    lower.includes("specified without provider") ||
+    lower.includes("model not found")
+  );
+}
+
+function extractModelIds(payload: unknown) {
+  const out = new Set<string>();
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      // Model identifiers in OpenClaw are usually "provider/model" or alias-like ids.
+      if (trimmed.includes("/") || /^[a-z0-9._-]+$/i.test(trimmed)) {
+        out.add(trimmed);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.id === "string") out.add(obj.id.trim());
+    if (typeof obj.model === "string") out.add(obj.model.trim());
+    if (typeof obj.name === "string" && obj.name.includes("/")) out.add(obj.name.trim());
+    for (const nested of Object.values(obj)) visit(nested);
+  };
+  visit(payload);
+  return out;
+}
+
+async function refreshModelCatalog() {
+  try {
+    const raw = await runOpenClawJson<unknown>(["models", "list", "--json"]);
+    const next = extractModelIds(raw);
+    if (next.size > 0) {
+      availableModelIds = next;
+      hasLoadedModelCatalog = true;
+    } else if (!hasLoadedModelCatalog) {
+      console.warn("[model-preflight] models list returned no model ids; skipping strict preflight");
+    }
+  } catch (error) {
+    if (!hasLoadedModelCatalog) {
+      console.warn("[model-preflight] unable to load models list; skipping strict preflight");
+    } else {
+      console.error("[model-preflight] failed to refresh model catalog:", error);
+    }
+  }
+}
+
+function isModelAvailable(modelId: string) {
+  const normalized = normalizeModelId(modelId).trim();
+  if (!normalized) return true;
+  if (!hasLoadedModelCatalog || availableModelIds.size === 0) return true;
+  if (availableModelIds.has(normalized)) return true;
+  // Allow unqualified alias if provider-qualified id exists with the same suffix.
+  for (const id of availableModelIds) {
+    if (id.endsWith(`/${normalized}`)) return true;
+  }
+  return false;
+}
+
+async function preflightAgentModels() {
+  await refreshModelCatalog();
+  if (!hasLoadedModelCatalog || availableModelIds.size === 0) return;
+  const agents = await client.query(api.agents.list);
+  for (const agent of agents) {
+    const thinking = normalizeModelId(agent.models.thinking);
+    const fallback = normalizeModelId(agent.models.fallback || "");
+    const unavailable: string[] = [];
+    if (thinking && !isModelAvailable(thinking)) unavailable.push(`thinking=${thinking}`);
+    if (fallback && !isModelAvailable(fallback)) unavailable.push(`fallback=${fallback}`);
+    if (unavailable.length > 0) {
+      console.warn(
+        `[model-preflight] ${agent.name} (${agentIdFromSessionKey(agent.sessionKey)}) unavailable model(s): ${unavailable.join(
+          ", "
+        )}`
+      );
+    }
+  }
+}
+
+async function ensureRetryStateLoaded() {
+  if (hasLoadedRetryState) return;
+  hasLoadedRetryState = true;
+  try {
+    const row = await client.query(api.settings.get, { key: WATCHER_MESSAGE_RETRY_STATE_KEY });
+    const value = row?.value;
+    if (!value || typeof value !== "object") {
+      retryStateByMessageId = {};
+      return;
+    }
+    const parsed: Record<string, { attempts: number; lastError: string; updatedAt: number }> = {};
+    for (const [messageId, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const attempts = Number(record.attempts || 0);
+      const lastError = typeof record.lastError === "string" ? record.lastError : "";
+      const updatedAt = Number(record.updatedAt || 0);
+      if (!messageId || !Number.isFinite(attempts) || attempts <= 0) continue;
+      parsed[messageId] = {
+        attempts: Math.max(1, Math.floor(attempts)),
+        lastError,
+        updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+      };
+    }
+    retryStateByMessageId = parsed;
+  } catch (error) {
+    console.error("[dispatch] failed to load retry state:", error);
+    retryStateByMessageId = {};
+  }
+}
+
+async function persistRetryState() {
+  const entries = Object.entries(retryStateByMessageId).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+  const trimmed = entries.slice(0, WATCHER_MESSAGE_RETRY_STATE_LIMIT);
+  retryStateByMessageId = Object.fromEntries(trimmed);
+  await client.mutation(api.settings.set, {
+    key: WATCHER_MESSAGE_RETRY_STATE_KEY,
+    value: retryStateByMessageId,
+  });
+}
+
+async function recordMessageDispatchFailure(messageId: string, errorMessage: string) {
+  await ensureRetryStateLoaded();
+  const current = retryStateByMessageId[messageId] ?? {
+    attempts: 0,
+    lastError: "",
+    updatedAt: 0,
+  };
+  retryStateByMessageId[messageId] = {
+    attempts: current.attempts + 1,
+    lastError: errorMessage.slice(0, 1000),
+    updatedAt: Date.now(),
+  };
+  await persistRetryState();
+}
+
+async function clearMessageDispatchFailure(messageId: string) {
+  await ensureRetryStateLoaded();
+  if (!(messageId in retryStateByMessageId)) return;
+  delete retryStateByMessageId[messageId];
+  await persistRetryState();
 }
 
 async function syncModels() {
@@ -585,6 +745,9 @@ async function runOpenClawAgentWithFailover(args: {
     const hasMoreAttempts = i < attempts.length - 1;
 
     try {
+      if (attempt.model && !isModelAvailable(attempt.model)) {
+        throw new Error(`Unknown model: ${attempt.model}`);
+      }
       await ensureAgentAuthOrder(args.runtimeAgentId, attempt.auth);
       if (attempt.model && modelCache.get(args.modelCacheKey) !== attempt.model) {
         await runOpenClaw(["models", "--agent", args.runtimeAgentId, "set", attempt.model]);
@@ -658,6 +821,53 @@ function extractRunId(payload: unknown): string | undefined {
     data?.meta?.runId,
   ];
   return candidates.find((value) => typeof value === "string" && value.trim())?.trim();
+}
+
+type DispatchVerificationStatus = "pass" | "fail" | "not_run" | "unknown";
+
+function extractDispatchVerification(assistantText: string): {
+  status: DispatchVerificationStatus;
+  summary?: string;
+  command?: string;
+} {
+  const text = assistantText.trim();
+  if (!text) return { status: "unknown" };
+
+  const statusMatch = text.match(/(?:test status|verification status)\s*:\s*([A-Z_\-\s]+)/i);
+  let status: DispatchVerificationStatus = "unknown";
+  if (statusMatch) {
+    const raw = statusMatch[1].trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (raw.startsWith("pass")) status = "pass";
+    else if (raw.startsWith("fail")) status = "fail";
+    else if (raw.startsWith("not_run") || raw.startsWith("notrun")) status = "not_run";
+    else if (raw.startsWith("unknown")) status = "unknown";
+  } else {
+    const lower = text.toLowerCase();
+    if (
+      lower.includes("all tests passed") ||
+      lower.includes("tests passed") ||
+      lower.includes("verification: pass")
+    ) {
+      status = "pass";
+    } else if (
+      lower.includes("tests failed") ||
+      lower.includes("test failed") ||
+      lower.includes("failing test") ||
+      lower.includes("verification: fail")
+    ) {
+      status = "fail";
+    } else if (
+      lower.includes("tests not run") ||
+      lower.includes("did not run tests") ||
+      lower.includes("unable to run tests")
+    ) {
+      status = "not_run";
+    }
+  }
+
+  const command = text.match(/(?:tests run)\s*:\s*([^\n\r]+)/i)?.[1]?.trim();
+  const summary = text.match(/(?:verification summary)\s*:\s*([^\n\r]+)/i)?.[1]?.trim();
+  return { status, command, summary };
 }
 
 function cleanText(value: string) {
@@ -1023,6 +1233,10 @@ function buildTaskDispatchPrompt(dispatch: ClaimedTaskDispatch): string {
   }
   lines.push("");
   lines.push("Continue this task and provide a concrete output.");
+  lines.push("End your response with exactly these lines:");
+  lines.push("Verification Status: PASS | FAIL | NOT_RUN | UNKNOWN");
+  lines.push("Tests Run: <exact command(s) or N/A>");
+  lines.push("Verification Summary: <1-2 concise lines>");
   return lines.join("\n");
 }
 
@@ -1087,15 +1301,20 @@ async function processTaskDispatchQueue() {
 
     const runId = extractRunId(result);
     const assistantText = extractAssistantText(result);
+    const verification = extractDispatchVerification(assistantText);
     await client.mutation(api.tasks.completeDispatch, {
       dispatchId: dispatch.dispatchId,
       runId,
       resultPreview: assistantText ? assistantText.slice(0, 300) : undefined,
+      verificationStatus: verification.status,
+      verificationSummary:
+        verification.summary || (assistantText ? assistantText.slice(0, 300) : undefined),
+      verificationCommand: verification.command,
     });
     console.log(
       `[task_dispatch_completed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} status=success durationMs=${
         Date.now() - startedAt
-      } runId=${runId ?? "-"}`
+      } runId=${runId ?? "-"} verification=${verification.status}`
     );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1194,6 +1413,7 @@ async function triggerOrchestrator(messageId?: string) {
 
 async function checkAndDispatchNewUserMessage() {
   await loadLastSeenUserMessageId();
+  await ensureRetryStateLoaded();
 
   const messages = await client.query(api.messages.list, { channel: "hq" });
   if (messages.length === 0) return;
@@ -1201,13 +1421,46 @@ async function checkAndDispatchNewUserMessage() {
   if (!newestUserMessage) return;
   if (newestUserMessage._id === lastSeenUserMessageId) return;
 
+  const retryState = retryStateByMessageId[newestUserMessage._id];
+  if (retryState && retryState.attempts >= WATCHER_MESSAGE_MAX_RETRIES) {
+    console.warn(
+      `[dispatch_dead_letter] messageId=${newestUserMessage._id} attempts=${retryState.attempts} reason=max_retries`
+    );
+    lastSeenUserMessageId = newestUserMessage._id;
+    await client.mutation(api.settings.set, {
+      key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
+      value: newestUserMessage._id,
+    });
+    return;
+  }
+
   console.log(`[dispatch] new HQ user message ${newestUserMessage._id}`);
-  await triggerOrchestrator(newestUserMessage._id);
-  lastSeenUserMessageId = newestUserMessage._id;
-  await client.mutation(api.settings.set, {
-    key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
-    value: newestUserMessage._id,
-  });
+  try {
+    await triggerOrchestrator(newestUserMessage._id);
+    await clearMessageDispatchFailure(newestUserMessage._id);
+    lastSeenUserMessageId = newestUserMessage._id;
+    await client.mutation(api.settings.set, {
+      key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
+      value: newestUserMessage._id,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await recordMessageDispatchFailure(newestUserMessage._id, errorMessage);
+    const attempts = retryStateByMessageId[newestUserMessage._id]?.attempts ?? 1;
+    const permanent = isPermanentDispatchError(errorMessage);
+    if (permanent || attempts >= WATCHER_MESSAGE_MAX_RETRIES) {
+      console.warn(
+        `[dispatch_dead_letter] messageId=${newestUserMessage._id} attempts=${attempts} reason=${
+          permanent ? "permanent_error" : "max_retries"
+        } error=${errorMessage}`
+      );
+      lastSeenUserMessageId = newestUserMessage._id;
+      await client.mutation(api.settings.set, {
+        key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
+        value: newestUserMessage._id,
+      });
+    }
+  }
 }
 
 async function checkManualDispatchRequest() {
@@ -1251,6 +1504,7 @@ async function main() {
   console.log(
     `Watcher active. poll=${POLL_MS}ms root=${missionControlRoot} instance=${watcherInstanceId}`
   );
+  await preflightAgentModels();
   while (true) {
     try {
       await tick();

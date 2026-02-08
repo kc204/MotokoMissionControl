@@ -90,6 +90,36 @@ async function main() {
       break;
     }
 
+    case "list-tasks": {
+      const tasks = await client.query(api.tasks.getAssigned, { agentId: agent._id });
+      console.log(JSON.stringify(tasks, null, 2));
+      break;
+    }
+
+    case "get-task": {
+      const [taskId] = args;
+      // @ts-ignore
+      const task = await client.query(api.tasks.get, { id: taskId });
+      console.log(JSON.stringify(task, null, 2));
+      break;
+    }
+
+    case "update-task-status": {
+      const [taskId, status] = args;
+      // @ts-ignore
+      await client.mutation(api.tasks.updateStatus, { id: taskId, status });
+      console.log(`Task ${taskId} status updated to ${status}`);
+      break;
+    }
+
+    case "list-messages": {
+      const [taskId] = args;
+      // @ts-ignore
+      const messages = await client.query(api.messages.list, { channel: `task:${taskId}` });
+      console.log(JSON.stringify(messages, null, 2));
+      break;
+    }
+
     default:
       console.error(`Unknown action: ${action}`);
   }

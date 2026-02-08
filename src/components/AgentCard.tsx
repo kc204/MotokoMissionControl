@@ -40,7 +40,7 @@ export default function AgentCard({
   const updateModel = useMutation(api.agents.updateModel);
   const [isEditing, setIsEditing] = useState(false);
   const normalizedThinkingModel =
-    models.thinking === "codex-cli" ? "anthropic/codex-cli" : models.thinking;
+    models.thinking === "anthropic/codex-cli" ? "codex-cli" : models.thinking;
 
   const currentModelName =
     availableModels.find((m) => m.id === normalizedThinkingModel)?.name || models.thinking;

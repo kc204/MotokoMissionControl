@@ -26,6 +26,8 @@ const dispatchStatus = v.union(
   v.literal("cancelled")
 );
 
+type DispatchVerificationStatus = "pass" | "fail" | "not_run" | "unknown";
+
 function truncate(text: string, max = 240) {
   const clean = text.trim().replace(/\s+/g, " ");
   if (clean.length <= max) return clean;
@@ -609,6 +611,11 @@ export const completeDispatch = mutation({
     dispatchId: v.id("taskDispatches"),
     runId: v.optional(v.string()),
     resultPreview: v.optional(v.string()),
+    verificationStatus: v.optional(
+      v.union(v.literal("pass"), v.literal("fail"), v.literal("not_run"), v.literal("unknown"))
+    ),
+    verificationSummary: v.optional(v.string()),
+    verificationCommand: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const dispatch = await ctx.db.get(args.dispatchId);
@@ -620,15 +627,35 @@ export const completeDispatch = mutation({
     if (!task) throw new Error("Task not found");
 
     const now = Date.now();
+    const verificationStatus: DispatchVerificationStatus = args.verificationStatus ?? "unknown";
+    const verificationSummary = args.verificationSummary
+      ? truncate(args.verificationSummary, 500)
+      : undefined;
+    const verificationCommand = args.verificationCommand
+      ? truncate(args.verificationCommand, 300)
+      : undefined;
+
     await ctx.db.patch(args.dispatchId, {
       status: "completed",
       runId: args.runId,
       resultPreview: args.resultPreview,
+      verificationStatus,
+      verificationSummary,
+      verificationCommand,
       finishedAt: now,
       error: undefined,
     });
 
+    let nextTaskStatus: "in_progress" | "review" | "blocked" = "review";
+    if (task.status === "in_progress") {
+      if (verificationStatus === "fail") nextTaskStatus = "blocked";
+      else nextTaskStatus = "review";
+    } else {
+      nextTaskStatus = task.status === "blocked" ? "blocked" : "review";
+    }
+
     await ctx.db.patch(task._id, {
+      status: task.status === "archived" ? "archived" : nextTaskStatus,
       updatedAt: now,
       openclawRunId: args.runId ?? task.openclawRunId,
     });
@@ -637,11 +664,37 @@ export const completeDispatch = mutation({
       type: "task_updated",
       taskId: task._id,
       projectId: task.projectId,
-      message: args.runId
-        ? `Dispatch started for "${task.title}" (run ${args.runId.slice(0, 8)})`
-        : `Dispatch started for "${task.title}"`,
+      message:
+        task.status === "archived"
+          ? `Dispatch completed for archived task "${task.title}" (verification: ${verificationStatus})`
+          : args.runId
+            ? `Dispatch completed for "${task.title}" (run ${args.runId.slice(
+                0,
+                8
+              )}, verification: ${verificationStatus})`
+            : `Dispatch completed for "${task.title}" (verification: ${verificationStatus})`,
       createdAt: now,
     });
+
+    if (task.status !== "archived" && verificationStatus !== "pass") {
+      const reason =
+        verificationStatus === "fail"
+          ? "Tests failed"
+          : verificationStatus === "not_run"
+            ? "Tests were not run"
+            : "Test verification missing";
+      for (const assigneeId of task.assigneeIds) {
+        await ctx.db.insert("notifications", {
+          targetAgentId: assigneeId,
+          content: `${reason} for "${task.title}". Moved to ${
+            nextTaskStatus === "blocked" ? "blocked" : "review"
+          }.`,
+          sourceTaskId: task._id,
+          delivered: false,
+          createdAt: now,
+        });
+      }
+    }
   },
 });
 

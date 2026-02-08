@@ -38,7 +38,7 @@ export function normalizeModelId(modelId?: string | null) {
   if (!modelId) return "";
   const trimmed = modelId.trim();
   if (!trimmed) return "";
-  if (trimmed === "codex-cli") return "anthropic/codex-cli";
+  if (trimmed === "anthropic/codex-cli") return "codex-cli";
   return trimmed;
 }
 

@@ -121,6 +121,15 @@ function isQuotaLikeError(message: string) {
   );
 }
 
+function isPermanentDispatchError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("unknown model") ||
+    lower.includes("specified without provider") ||
+    lower.includes("model not found")
+  );
+}
+
 function levelLabel(level?: "LEAD" | "INT" | "SPC") {
   if (level === "LEAD") return "Lead";
   if (level === "INT") return "Integrator";
@@ -578,6 +587,27 @@ async function runOpenClawAndEnsureReply(args: {
   throw new Error("OpenClaw run failed without a captured error");
 }
 
+async function persistPermanentDispatchFailure(args: {
+  channel: string;
+  messageId: string;
+  agentDbId: Id<"agents">;
+  agentName: string;
+  mode: "single" | "team";
+  errorMessage: string;
+}) {
+  const conciseError = cleanText(args.errorMessage).slice(0, 300);
+  const text = `[dispatch_failure] message=${args.messageId} mode=${args.mode} agent=${args.agentName} reason=${conciseError}`;
+  await client.mutation(api.messages.send, {
+    channel: args.channel,
+    text,
+    agentId: args.agentDbId,
+  });
+  await client.mutation(api.settings.set, { key: DEDUPE_KEY, value: args.messageId });
+  console.warn(
+    `[dispatch_permanent_failure_handled] messageId=${args.messageId} mode=${args.mode} agent=${args.agentName}`
+  );
+}
+
 async function selectPendingMessages(channel: string, explicitId?: string) {
   const messages = (await client.query(api.messages.list, { channel })) as OrchestratorMessage[];
   const userMessages = messages.filter((m) => !m.agentId);
@@ -675,16 +705,28 @@ async function runTeamWorkflow(args: {
       userMessage: userText,
       leadKickoff: kickoffText,
     });
-    const updateText = await runAgentStage({
-      channel: args.channel,
-      agent: specialist,
-      prompt: specialistPrompt,
-      activeMessage: "Working specialist stream",
-      idleMessage: "Specialist stream complete",
-      messageId: args.message._id,
-      stage: `specialist_${specialist.name.toLowerCase()}`,
-    });
-    specialistUpdates.push({ name: specialist.name, update: updateText });
+    try {
+      const updateText = await runAgentStage({
+        channel: args.channel,
+        agent: specialist,
+        prompt: specialistPrompt,
+        activeMessage: "Working specialist stream",
+        idleMessage: "Specialist stream complete",
+        messageId: args.message._id,
+        stage: `specialist_${specialist.name.toLowerCase()}`,
+      });
+      specialistUpdates.push({ name: specialist.name, update: updateText });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[team_stage_failed] messageId=${args.message._id} stage=specialist_${specialist.name.toLowerCase()} agent=${specialist.name} error=${errorMessage}`
+      );
+      specialistUpdates.push({
+        name: specialist.name,
+        update: `[FAILED] ${specialist.name}: ${cleanText(errorMessage).slice(0, 240)}`,
+      });
+      continue;
+    }
   }
 
   const synthesisPrompt = buildLeadSynthesisPrompt({
@@ -800,6 +842,17 @@ async function main() {
             error: errorMessage.slice(0, 1000),
           },
         });
+        if (isPermanentDispatchError(errorMessage)) {
+          await persistPermanentDispatchFailure({
+            channel,
+            messageId: msg._id,
+            agentDbId: target._id,
+            agentName: target.name,
+            mode: "single",
+            errorMessage,
+          });
+          continue;
+        }
         throw error;
       }
       continue;
@@ -879,6 +932,17 @@ async function main() {
             error: errorMessage.slice(0, 1000),
           },
         });
+        if (isPermanentDispatchError(errorMessage)) {
+          await persistPermanentDispatchFailure({
+            channel,
+            messageId: msg._id,
+            agentDbId: target._id,
+            agentName: target.name,
+            mode: "single",
+            errorMessage,
+          });
+          continue;
+        }
         throw error;
       }
       continue;
@@ -957,6 +1021,17 @@ async function main() {
           error: errorMessage.slice(0, 1000),
         },
       });
+      if (isPermanentDispatchError(errorMessage)) {
+        await persistPermanentDispatchFailure({
+          channel,
+          messageId: msg._id,
+          agentDbId: lead._id,
+          agentName: lead.name,
+          mode: "team",
+          errorMessage,
+        });
+        continue;
+      }
       throw error;
     }
   }
