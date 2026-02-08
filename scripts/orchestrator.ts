@@ -22,6 +22,8 @@ const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const LAST_DISPATCH_STARTED_KEY = "probe:last_dispatch_started";
 const LAST_REPORT_CHAT_KEY = "probe:last_report_chat_write";
 const reportScriptPath = buildTsxCommand("report.ts");
+const ORCHESTRATOR_MIN_SPECIALISTS = Math.max(1, Number(process.env.ORCHESTRATOR_MIN_SPECIALISTS || 2));
+const ORCHESTRATOR_FAILOVER_ENABLED = process.env.ORCHESTRATOR_FAILOVER_ENABLED !== "false";
 
 const client = new ConvexHttpClient(convexUrl);
 const runtimeModelCache = new Map<string, string>();
@@ -50,6 +52,11 @@ type OrchestratorMessage = {
   content?: string;
   mentions?: string[];
   agentId?: Id<"agents">;
+};
+
+type AuthProfileCandidate = {
+  provider: string;
+  profileId: string;
 };
 
 function spawnOpenClaw(args: string[]) {
@@ -101,6 +108,17 @@ function routeAgentName(text: string, mentions: string[], knownAgentNames: strin
 
 function cleanText(value: string) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function isQuotaLikeError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("capacity") ||
+    lower.includes("rate limit") ||
+    lower.includes("exhausted")
+  );
 }
 
 function levelLabel(level?: "LEAD" | "INT" | "SPC") {
@@ -176,7 +194,10 @@ function pickSpecialistsForMission(args: {
     .map((name) => specialistByName.get(name))
     .filter((agent): agent is AgentRecord => !!agent && agent.name !== args.leadName);
 
-  const minimumSpecialists = Math.min(2, fallbackOrder.length || selected.length);
+  const minimumSpecialists = Math.min(
+    ORCHESTRATOR_MIN_SPECIALISTS,
+    fallbackOrder.length || selected.length
+  );
   for (const fallback of fallbackOrder) {
     if (selected.some((agent) => agent._id === fallback._id)) continue;
     selected.push(fallback);
@@ -293,41 +314,61 @@ function extractAssistantText(payload: unknown): string {
   return parts.join("\n\n").trim();
 }
 
-async function getActiveAuthProfile() {
-  const active = await client.query(api.auth.getActive);
-  if (!active) return null;
-  const provider =
-    (typeof active.provider === "string" && active.provider) ||
-    active.profileId.split(":")[0] ||
-    "";
-  if (!provider) return null;
-  return { provider, profileId: active.profileId };
+async function getAuthProfileCandidates() {
+  const profiles = await client.query(api.auth.list);
+  const normalized = profiles
+    .map((profile) => {
+      const provider =
+        (typeof profile.provider === "string" && profile.provider) ||
+        profile.profileId.split(":")[0] ||
+        "";
+      if (!provider || !profile.profileId) return null;
+      return {
+        provider,
+        profileId: profile.profileId,
+        isActive: !!profile.isActive,
+      };
+    })
+    .filter((profile): profile is AuthProfileCandidate & { isActive: boolean } => !!profile)
+    .sort((a, b) => Number(b.isActive) - Number(a.isActive));
+
+  const deduped: AuthProfileCandidate[] = [];
+  const seen = new Set<string>();
+  for (const profile of normalized) {
+    if (seen.has(profile.profileId)) continue;
+    seen.add(profile.profileId);
+    deduped.push({ provider: profile.provider, profileId: profile.profileId });
+  }
+  return deduped;
 }
 
-async function ensureAgentRuntimeConfig(agentRuntimeId: string, thinkingModel: string) {
-  const normalizedModel = normalizeModelId(thinkingModel);
-  const activeAuth = await getActiveAuthProfile();
-  if (activeAuth) {
-    const authKey = `${activeAuth.provider}:${activeAuth.profileId}`;
-    if (runtimeAuthCache.get(agentRuntimeId) !== authKey) {
+async function ensureAgentRuntimeConfig(args: {
+  agentRuntimeId: string;
+  thinkingModel: string;
+  authProfile: AuthProfileCandidate | null;
+}) {
+  const normalizedModel = normalizeModelId(args.thinkingModel);
+  if (args.authProfile) {
+    const authKey = `${args.authProfile.provider}:${args.authProfile.profileId}`;
+    if (runtimeAuthCache.get(args.agentRuntimeId) !== authKey) {
       await runOpenClawAgentCommand([
         "models",
         "auth",
         "order",
         "set",
         "--provider",
-        activeAuth.provider,
+        args.authProfile.provider,
         "--agent",
-        agentRuntimeId,
-        activeAuth.profileId,
+        args.agentRuntimeId,
+        args.authProfile.profileId,
       ]);
-      runtimeAuthCache.set(agentRuntimeId, authKey);
+      runtimeAuthCache.set(args.agentRuntimeId, authKey);
     }
   }
 
-  if (normalizedModel && runtimeModelCache.get(agentRuntimeId) !== normalizedModel) {
-    await runOpenClawAgentCommand(["models", "--agent", agentRuntimeId, "set", normalizedModel]);
-    runtimeModelCache.set(agentRuntimeId, normalizedModel);
+  if (normalizedModel && runtimeModelCache.get(args.agentRuntimeId) !== normalizedModel) {
+    await runOpenClawAgentCommand(["models", "--agent", args.agentRuntimeId, "set", normalizedModel]);
+    runtimeModelCache.set(args.agentRuntimeId, normalizedModel);
   }
 }
 
@@ -458,41 +499,83 @@ async function runOpenClawAndEnsureReply(args: {
   agentName: string;
   agentRuntimeId: string;
   thinkingModel: string;
+  fallbackModel?: string;
   prompt: string;
 }) {
-  await ensureAgentRuntimeConfig(args.agentRuntimeId, args.thinkingModel);
-
   const before = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
-  let result: OpenClawRunResult;
-  try {
-    result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
-  } catch (firstError) {
-    const hasReply = await waitForAgentReply({
-      channel: args.channel,
-      agentDbId: args.agentDbId,
-      beforeMessageId: before?._id ?? null,
-      timeoutMs: 3000,
-      intervalMs: 300,
-    });
-    if (hasReply) {
-      const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
-      console.warn(
-        `[dispatch_retry_skip] agent=${args.agentRuntimeId} reason=${firstErrorMessage} reply=already_persisted`
-      );
-      return;
+
+  const modelCandidates = [
+    normalizeModelId(args.thinkingModel),
+    normalizeModelId(args.fallbackModel ?? ""),
+  ].filter((model, index, all) => !!model && all.indexOf(model) === index);
+
+  const authCandidates = ORCHESTRATOR_FAILOVER_ENABLED
+    ? await getAuthProfileCandidates()
+    : [];
+  const authCandidateList: Array<AuthProfileCandidate | null> =
+    authCandidates.length > 0 ? authCandidates : [null];
+
+  const attempts: Array<{ model: string; auth: AuthProfileCandidate | null }> = [];
+  for (const model of modelCandidates) {
+    for (const auth of authCandidateList) {
+      attempts.push({ model, auth });
     }
-    const firstErrorMessage = firstError instanceof Error ? firstError.message : String(firstError);
-    console.error(`[dispatch_retry] agent=${args.agentRuntimeId} reason=${firstErrorMessage}`);
-    result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
+  }
+  if (attempts.length === 0) {
+    attempts.push({ model: normalizeModelId(args.thinkingModel), auth: null });
   }
 
-  await ensureHqReplyPersisted({
-    channel: args.channel,
-    agentDbId: args.agentDbId,
-    agentName: args.agentName,
-    beforeMessageId: before?._id ?? null,
-    assistantText: result.assistantText,
-  });
+  let lastError: Error | null = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    const hasMoreAttempts = i < attempts.length - 1;
+
+    try {
+      await ensureAgentRuntimeConfig({
+        agentRuntimeId: args.agentRuntimeId,
+        thinkingModel: attempt.model,
+        authProfile: attempt.auth,
+      });
+      const result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
+      await ensureHqReplyPersisted({
+        channel: args.channel,
+        agentDbId: args.agentDbId,
+        agentName: args.agentName,
+        beforeMessageId: before?._id ?? null,
+        assistantText: result.assistantText,
+      });
+      return;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const hasReply = await waitForAgentReply({
+        channel: args.channel,
+        agentDbId: args.agentDbId,
+        beforeMessageId: before?._id ?? null,
+        timeoutMs: 3000,
+        intervalMs: 300,
+      });
+      if (hasReply) {
+        console.warn(
+          `[dispatch_retry_skip] agent=${args.agentRuntimeId} reason=${errorMessage} reply=already_persisted`
+        );
+        return;
+      }
+
+      lastError = error instanceof Error ? error : new Error(errorMessage);
+      if (ORCHESTRATOR_FAILOVER_ENABLED && isQuotaLikeError(errorMessage) && hasMoreAttempts) {
+        console.warn(
+          `[dispatch_failover] agent=${args.agentRuntimeId} model=${attempt.model} auth=${
+            attempt.auth?.profileId ?? "-"
+          } reason=${errorMessage}`
+        );
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error("OpenClaw run failed without a captured error");
 }
 
 async function selectPendingMessages(channel: string, explicitId?: string) {
@@ -540,6 +623,7 @@ async function runAgentStage(args: {
       agentName: args.agent.name,
       agentRuntimeId: runtimeAgentId,
       thinkingModel: args.agent.models.thinking,
+      fallbackModel: args.agent.models.fallback,
       prompt: args.prompt,
     });
   } finally {

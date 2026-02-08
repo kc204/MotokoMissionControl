@@ -32,8 +32,23 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
+function formatRelativeTime(ts?: number | null) {
+  if (!ts || !Number.isFinite(ts)) return "n/a";
+  const delta = Date.now() - ts;
+  if (delta < 1000) return "just now";
+  const s = Math.floor(delta / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 export default function SettingsPage() {
   const config = useQuery(api.settings.getAutomationConfig);
+  const ops = useQuery(api.ops.overview);
   const updateConfig = useMutation(api.settings.updateAutomationConfig);
   const [form, setForm] = useState<AutomationForm>(DEFAULT_FORM);
   const [isSaving, setIsSaving] = useState(false);
@@ -218,6 +233,66 @@ export default function SettingsPage() {
           </button>
           <span className="text-xs text-zinc-400">{status}</span>
         </div>
+      </section>
+
+      <section className="mt-6 max-w-5xl rounded-2xl border border-white/10 bg-black/35 p-5">
+        <div className="mb-4">
+          <h2 className="text-xl font-semibold text-zinc-100">Operations Dashboard</h2>
+          <p className="mt-1 text-xs text-zinc-400">
+            Live queue, reliability, and watcher health for autonomous runs.
+          </p>
+        </div>
+        {!ops ? (
+          <div className="h-20 animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <p className="text-xs uppercase tracking-wider text-zinc-500">Dispatch Queue</p>
+              <p className="mt-2 text-sm text-zinc-200">Pending: {ops.dispatch.pending}</p>
+              <p className="text-sm text-zinc-200">Running: {ops.dispatch.running}</p>
+              <p className="mt-2 text-[11px] text-zinc-500">
+                24h: {ops.dispatch.recent24h.completed} done / {ops.dispatch.recent24h.failed} failed /{" "}
+                {ops.dispatch.recent24h.cancelled} cancelled
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <p className="text-xs uppercase tracking-wider text-zinc-500">Dispatch Health</p>
+              <p className="mt-2 text-sm text-zinc-200">
+                Last started:{" "}
+                {formatRelativeTime(
+                  typeof (ops.dispatch.lastStarted as { at?: number } | null)?.at === "number"
+                    ? (ops.dispatch.lastStarted as { at?: number }).at
+                    : null
+                )}
+              </p>
+              <p className="text-sm text-zinc-200">
+                Last result: {(ops.dispatch.lastResult as { status?: string } | null)?.status ?? "n/a"}
+              </p>
+              <p className="mt-2 text-[11px] text-zinc-500">
+                Updated{" "}
+                {formatRelativeTime(
+                  typeof (ops.dispatch.lastResult as { at?: number } | null)?.at === "number"
+                    ? (ops.dispatch.lastResult as { at?: number }).at
+                    : null
+                )}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <p className="text-xs uppercase tracking-wider text-zinc-500">Agents</p>
+              <p className="mt-2 text-sm text-zinc-200">Total: {ops.agents.total}</p>
+              <p className="text-sm text-zinc-200">Active: {ops.agents.active}</p>
+              <p className="text-sm text-zinc-200">Blocked: {ops.agents.blocked}</p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <p className="text-xs uppercase tracking-wider text-zinc-500">Watcher + Delivery</p>
+              <p className="mt-2 text-sm text-zinc-200">
+                Watcher: {ops.watcher.isHealthy ? "healthy" : "stale"}
+              </p>
+              <p className="text-sm text-zinc-200">Owner: {ops.watcher.owner ?? "none"}</p>
+              <p className="text-sm text-zinc-200">Undelivered notifications: {ops.notifications.undelivered}</p>
+            </div>
+          </div>
+        )}
       </section>
 
       <div className="mt-6">

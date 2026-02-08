@@ -34,10 +34,15 @@ const WATCHER_LEASE_RENEW_MS = Number(
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const TASK_HQ_COLLAB_ENABLED = process.env.TASK_HQ_COLLAB_ENABLED !== "false";
+const WATCHER_FAILOVER_ENABLED = process.env.WATCHER_FAILOVER_ENABLED !== "false";
+const parsedTaskHqMinSpecialists = Number(process.env.TASK_HQ_COLLAB_MIN_SPECIALISTS || 2);
+const TASK_HQ_COLLAB_MIN_SPECIALISTS = Number.isFinite(parsedTaskHqMinSpecialists)
+  ? Math.max(1, Math.floor(parsedTaskHqMinSpecialists))
+  : 2;
 const parsedTaskHqSpecialistCount = Number(process.env.TASK_HQ_COLLAB_MAX_SPECIALISTS || 2);
 const TASK_HQ_COLLAB_MAX_SPECIALISTS = Number.isFinite(parsedTaskHqSpecialistCount)
-  ? Math.max(1, Math.floor(parsedTaskHqSpecialistCount))
-  : 2;
+  ? Math.max(TASK_HQ_COLLAB_MIN_SPECIALISTS, Math.floor(parsedTaskHqSpecialistCount))
+  : Math.max(TASK_HQ_COLLAB_MIN_SPECIALISTS, 2);
 const missionControlRoot = resolveMissionControlRoot();
 const tsxCliPath = path.join(missionControlRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const orchestratorScriptPath = resolveScriptPath("orchestrator.ts");
@@ -309,6 +314,8 @@ type ActiveAuthProfile = {
   profileId: string;
 };
 
+type AuthProfileCandidate = ActiveAuthProfile;
+
 type DispatchThreadMessage = {
   fromUser: boolean;
   text: string;
@@ -349,6 +356,7 @@ type ClaimedTaskDispatch = {
   targetAgentName: string;
   targetSessionKey: string;
   targetThinkingModel: string;
+  targetFallbackModel: string;
   targetAgentLevel: "LEAD" | "INT" | "SPC";
   targetAgentRole: string;
   targetAgentSystemPrompt: string;
@@ -470,6 +478,45 @@ async function getActiveAuthProfile(): Promise<ActiveAuthProfile | null> {
   return { provider, profileId: active.profileId };
 }
 
+async function getAuthProfileCandidates(
+  preferred: ActiveAuthProfile | null
+): Promise<Array<AuthProfileCandidate | null>> {
+  const profiles = await client.query(api.auth.list);
+  const normalized = profiles
+    .map((profile) => {
+      const provider =
+        (typeof profile.provider === "string" && profile.provider) ||
+        profile.profileId.split(":")[0] ||
+        "";
+      if (!provider || !profile.profileId) return null;
+      return {
+        provider,
+        profileId: profile.profileId,
+        isActive: !!profile.isActive,
+      };
+    })
+    .filter((profile): profile is AuthProfileCandidate & { isActive: boolean } => !!profile)
+    .sort((a, b) => Number(b.isActive) - Number(a.isActive));
+
+  const deduped: AuthProfileCandidate[] = [];
+  const seen = new Set<string>();
+  const preferredKey = preferred ? `${preferred.provider}:${preferred.profileId}` : "";
+  if (preferred && !seen.has(preferred.profileId)) {
+    deduped.push(preferred);
+    seen.add(preferred.profileId);
+  }
+
+  for (const profile of normalized) {
+    if (seen.has(profile.profileId)) continue;
+    const key = `${profile.provider}:${profile.profileId}`;
+    if (preferredKey && key === preferredKey) continue;
+    deduped.push({ provider: profile.provider, profileId: profile.profileId });
+    seen.add(profile.profileId);
+  }
+
+  return deduped.length > 0 ? deduped : [null];
+}
+
 async function ensureAgentAuthOrder(runtimeAgentId: string, auth: ActiveAuthProfile | null) {
   if (!auth) return;
   const syncKey = `${auth.provider}:${auth.profileId}`;
@@ -487,6 +534,99 @@ async function ensureAgentAuthOrder(runtimeAgentId: string, auth: ActiveAuthProf
     auth.profileId,
   ]);
   authProfileCacheByAgent.set(runtimeAgentId, syncKey);
+}
+
+function isQuotaLikeError(message: string) {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("capacity") ||
+    lower.includes("rate limit") ||
+    lower.includes("exhausted")
+  );
+}
+
+async function runOpenClawAgentWithFailover(args: {
+  dispatchId: Id<"taskDispatches">;
+  runtimeAgentId: string;
+  sessionId: string;
+  prompt: string;
+  primaryModel: string;
+  fallbackModel?: string;
+  modelCacheKey: string;
+  preferredAuthProfile: ActiveAuthProfile | null;
+}) {
+  const modelCandidates = [
+    normalizeModelId(args.primaryModel),
+    WATCHER_FAILOVER_ENABLED ? normalizeModelId(args.fallbackModel ?? "") : "",
+  ].filter((model, index, all) => !!model && all.indexOf(model) === index);
+
+  const authCandidates = WATCHER_FAILOVER_ENABLED
+    ? await getAuthProfileCandidates(args.preferredAuthProfile)
+    : [args.preferredAuthProfile ?? null];
+
+  const attempts: Array<{ model: string; auth: ActiveAuthProfile | null }> = [];
+  for (const model of modelCandidates) {
+    for (const auth of authCandidates) {
+      attempts.push({ model, auth });
+    }
+  }
+  if (attempts.length === 0) {
+    attempts.push({
+      model: normalizeModelId(args.primaryModel) || args.primaryModel,
+      auth: args.preferredAuthProfile,
+    });
+  }
+
+  let lastError: Error | null = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    const hasMoreAttempts = i < attempts.length - 1;
+
+    try {
+      await ensureAgentAuthOrder(args.runtimeAgentId, attempt.auth);
+      if (attempt.model && modelCache.get(args.modelCacheKey) !== attempt.model) {
+        await runOpenClaw(["models", "--agent", args.runtimeAgentId, "set", attempt.model]);
+        modelCache.set(args.modelCacheKey, attempt.model);
+      }
+
+      return await runOpenClawJson<unknown>([
+        "agent",
+        "--agent",
+        args.runtimeAgentId,
+        "--session-id",
+        args.sessionId,
+        "--message",
+        args.prompt,
+        "--json",
+      ], {
+        shouldCancel: async () =>
+          await client.query(api.tasks.shouldCancelDispatch, {
+            dispatchId: args.dispatchId,
+          }),
+        cancelCheckMs: 750,
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage === "Dispatch cancelled") {
+        throw new Error(errorMessage);
+      }
+      lastError = error instanceof Error ? error : new Error(errorMessage);
+      if (WATCHER_FAILOVER_ENABLED && isQuotaLikeError(errorMessage) && hasMoreAttempts) {
+        console.warn(
+          `[dispatch_failover] dispatchId=${args.dispatchId} runtimeAgent=${args.runtimeAgentId} model=${
+            attempt.model || "-"
+          } auth=${attempt.auth?.profileId ?? "-"} reason=${errorMessage}`
+        );
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error("OpenClaw run failed without captured error");
 }
 
 function extractAssistantText(payload: unknown): string {
@@ -583,6 +723,15 @@ function pickTaskSpecialists(args: {
     if (selected.some((item) => item._id === fallback._id)) continue;
     selected.push(fallback);
     if (selected.length >= TASK_HQ_COLLAB_MAX_SPECIALISTS) break;
+  }
+
+  const minimumSpecialists = Math.min(TASK_HQ_COLLAB_MIN_SPECIALISTS, fallbackOrder.length || selected.length);
+  if (selected.length < minimumSpecialists) {
+    for (const fallback of fallbackOrder) {
+      if (selected.some((item) => item._id === fallback._id)) continue;
+      selected.push(fallback);
+      if (selected.length >= minimumSpecialists) break;
+    }
   }
 
   return selected.slice(0, TASK_HQ_COLLAB_MAX_SPECIALISTS);
@@ -720,19 +869,6 @@ async function ensureHqReplyPersisted(args: {
   });
 }
 
-async function ensureAgentRuntimeConfig(args: {
-  agent: AgentRecord;
-  activeAuthProfile: ActiveAuthProfile | null;
-}) {
-  const runtimeAgentId = agentIdFromSessionKey(args.agent.sessionKey);
-  await ensureAgentAuthOrder(runtimeAgentId, args.activeAuthProfile);
-  const desiredModel = normalizeModelId(args.agent.models.thinking);
-  if (!desiredModel) return;
-  if (modelCache.get(args.agent.sessionKey) === desiredModel) return;
-  await runOpenClaw(["models", "--agent", runtimeAgentId, "set", desiredModel]);
-  modelCache.set(args.agent.sessionKey, desiredModel);
-}
-
 async function runHqAgentStage(args: {
   dispatchId: Id<"taskDispatches">;
   dispatchTaskId: Id<"tasks">;
@@ -742,26 +878,18 @@ async function runHqAgentStage(args: {
   prompt: string;
   activeAuthProfile: ActiveAuthProfile | null;
 }) {
-  await ensureAgentRuntimeConfig({ agent: args.agent, activeAuthProfile: args.activeAuthProfile });
-
   const runtimeAgentId = agentIdFromSessionKey(args.agent.sessionKey);
   const sessionId = `hq-task-${args.dispatchTaskId}-${args.sessionSuffix}-${runtimeAgentId}`;
   const before = await getLatestAgentMessageInChannel(args.channel, args.agent._id);
-  const result = await runOpenClawJson<unknown>([
-    "agent",
-    "--agent",
+  const result = await runOpenClawAgentWithFailover({
+    dispatchId: args.dispatchId,
     runtimeAgentId,
-    "--session-id",
     sessionId,
-    "--message",
-    args.prompt,
-    "--json",
-  ], {
-    shouldCancel: async () =>
-      await client.query(api.tasks.shouldCancelDispatch, {
-        dispatchId: args.dispatchId,
-      }),
-    cancelCheckMs: 750,
+    prompt: args.prompt,
+    primaryModel: args.agent.models.thinking,
+    fallbackModel: args.agent.models.fallback,
+    modelCacheKey: args.agent.sessionKey,
+    preferredAuthProfile: args.activeAuthProfile,
   });
 
   const assistantText = extractAssistantText(result);
@@ -946,29 +1074,15 @@ async function processTaskDispatchQueue() {
       );
     }
 
-    await ensureAgentAuthOrder(runtimeAgentId, activeAuthProfile);
-
-    // Enforce the selected model when changed to avoid unnecessary config churn.
-    if (targetThinkingModel && modelCache.get(dispatch.targetSessionKey) !== targetThinkingModel) {
-      await runOpenClaw(["models", "--agent", runtimeAgentId, "set", targetThinkingModel]);
-      modelCache.set(dispatch.targetSessionKey, targetThinkingModel);
-    }
-
-    const result = await runOpenClawJson<unknown>([
-      "agent",
-      "--agent",
+    const result = await runOpenClawAgentWithFailover({
+      dispatchId: dispatch.dispatchId,
       runtimeAgentId,
-      "--session-id",
       sessionId,
-      "--message",
       prompt,
-      "--json",
-    ], {
-      shouldCancel: async () =>
-        await client.query(api.tasks.shouldCancelDispatch, {
-          dispatchId: dispatch.dispatchId,
-        }),
-      cancelCheckMs: 750,
+      primaryModel: targetThinkingModel || dispatch.targetThinkingModel,
+      fallbackModel: dispatch.targetFallbackModel,
+      modelCacheKey: dispatch.targetSessionKey,
+      preferredAuthProfile: activeAuthProfile,
     });
 
     const runId = extractRunId(result);

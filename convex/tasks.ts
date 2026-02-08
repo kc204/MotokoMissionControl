@@ -589,6 +589,7 @@ export const claimNextDispatch = mutation({
         targetAgentName: targetAgent.name,
         targetSessionKey: targetAgent.sessionKey,
         targetThinkingModel: targetAgent.models.thinking,
+        targetFallbackModel: targetAgent.models.fallback,
         targetAgentLevel: targetAgent.level ?? "SPC",
         targetAgentRole: targetAgent.role,
         targetAgentSystemPrompt: targetAgent.systemPrompt ?? "",
