@@ -27,6 +27,31 @@ const client = new ConvexHttpClient(convexUrl);
 const runtimeModelCache = new Map<string, string>();
 const runtimeAuthCache = new Map<string, string>();
 
+type AgentRecord = {
+  _id: Id<"agents">;
+  name: string;
+  role: string;
+  level?: "LEAD" | "INT" | "SPC";
+  sessionKey: string;
+  models: {
+    thinking: string;
+    execution?: string;
+    heartbeat: string;
+    fallback: string;
+  };
+  systemPrompt?: string;
+  character?: string;
+  lore?: string;
+};
+
+type OrchestratorMessage = {
+  _id: string;
+  text?: string;
+  content?: string;
+  mentions?: string[];
+  agentId?: Id<"agents">;
+};
+
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
     return spawn("cmd.exe", ["/d", "/s", "/c", OPENCLAW_BIN, ...args], {
@@ -74,18 +99,178 @@ function routeAgentName(text: string, mentions: string[], knownAgentNames: strin
   return "Motoko";
 }
 
-function buildPrompt(agentName: string, userMessage: string) {
-  const cleanTask = userMessage.replace(/\s+/g, " ").trim();
+function cleanText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function levelLabel(level?: "LEAD" | "INT" | "SPC") {
+  if (level === "LEAD") return "Lead";
+  if (level === "INT") return "Integrator";
+  if (level === "SPC") return "Specialist";
+  return "Specialist";
+}
+
+function buildAgentPersonaBlock(agent: AgentRecord) {
+  const lines = [
+    `${agent.name} Role: ${agent.role} (${levelLabel(agent.level)})`,
+  ];
+  if (agent.systemPrompt?.trim()) lines.push(`System Prompt: ${cleanText(agent.systemPrompt)}`);
+  if (agent.character?.trim()) lines.push(`Character: ${cleanText(agent.character)}`);
+  if (agent.lore?.trim()) lines.push(`Lore: ${cleanText(agent.lore)}`);
+  return lines.join("\n");
+}
+
+function parseMentionedAgentNames(mentions: string[], knownAgentNames: string[]) {
+  const out: string[] = [];
+  for (const tag of mentions) {
+    const candidate = tag.replace(/^@/, "").toLowerCase();
+    const matched = knownAgentNames.find((name) => name.toLowerCase() === candidate);
+    if (!matched) continue;
+    if (!out.includes(matched)) out.push(matched);
+  }
+  return out;
+}
+
+function findAgentByName(agents: AgentRecord[], name: string) {
+  return agents.find((agent) => agent.name.toLowerCase() === name.toLowerCase()) ?? null;
+}
+
+function pickSpecialistsForMission(args: {
+  userMessage: string;
+  mentions: string[];
+  agents: AgentRecord[];
+  leadName: string;
+}) {
+  const knownNames = args.agents.map((agent) => agent.name);
+  const mentioned = parseMentionedAgentNames(args.mentions, knownNames);
+  if (args.mentions.some((tag) => tag.toLowerCase() === "@all")) {
+    return args.agents.filter((agent) => agent.name !== args.leadName);
+  }
+
+  const explicitlyMentionedSpecialists = mentioned
+    .map((name) => findAgentByName(args.agents, name))
+    .filter((agent): agent is AgentRecord => !!agent && agent.name !== args.leadName);
+  if (explicitlyMentionedSpecialists.length > 0) return explicitlyMentionedSpecialists;
+
+  const lowerText = args.userMessage.toLowerCase();
+  const specialistByName = new Map(args.agents.map((agent) => [agent.name, agent]));
+  const selected: AgentRecord[] = [];
+
+  const keywordRules: Array<{ name: string; keywords: string[] }> = [
+    { name: "Recon", keywords: ["research", "competitor", "source", "find", "investigate"] },
+    { name: "Forge", keywords: ["code", "bug", "deploy", "build", "fix", "refactor"] },
+    { name: "Quill", keywords: ["write", "content", "copy", "docs", "document", "post"] },
+    { name: "Pulse", keywords: ["metric", "analytics", "conversion", "monitor", "performance"] },
+  ];
+
+  for (const rule of keywordRules) {
+    if (!rule.keywords.some((keyword) => lowerText.includes(keyword))) continue;
+    const specialist = specialistByName.get(rule.name);
+    if (!specialist || specialist.name === args.leadName) continue;
+    if (!selected.some((agent) => agent._id === specialist._id)) {
+      selected.push(specialist);
+    }
+  }
+
+  const fallbackOrder = ["Forge", "Recon", "Quill", "Pulse"]
+    .map((name) => specialistByName.get(name))
+    .filter((agent): agent is AgentRecord => !!agent && agent.name !== args.leadName);
+
+  const minimumSpecialists = Math.min(2, fallbackOrder.length || selected.length);
+  for (const fallback of fallbackOrder) {
+    if (selected.some((agent) => agent._id === fallback._id)) continue;
+    selected.push(fallback);
+    if (selected.length >= minimumSpecialists) break;
+  }
+
+  return selected;
+}
+
+function buildSingleAgentPrompt(agent: AgentRecord, userMessage: string) {
+  const cleanTask = cleanText(userMessage);
   return [
-    `You are ${agentName} operating inside Mission Control.`,
+    `You are ${agent.name} operating inside Mission Control.`,
+    buildAgentPersonaBlock(agent),
     `Task from HQ: ${cleanTask}`,
-    `Do in order: (1) ${reportScriptPath} heartbeat ${agentName} active \"Working on HQ task\";`,
+    `Do in order: (1) ${reportScriptPath} heartbeat ${agent.name} active \"Working on HQ task\";`,
     `(2) perform the task;`,
-    `(3) post your actual answer via ${reportScriptPath} chat ${agentName} \"YOUR_FINAL_ANSWER\";`,
-    `(4) ${reportScriptPath} heartbeat ${agentName} idle \"Task complete\".`,
+    `(3) post your actual answer via ${reportScriptPath} chat ${agent.name} \"YOUR_FINAL_ANSWER\";`,
+    `(4) ${reportScriptPath} heartbeat ${agent.name} idle \"Task complete\".`,
     "Your final answer must be plain text, specific, and non-empty.",
     "Do not output NO_REPLY. If a report command fails, include full error and retry once.",
-  ].join(" ");
+  ].join("\n");
+}
+
+function buildLeadKickoffPrompt(lead: AgentRecord, specialists: AgentRecord[], userMessage: string) {
+  const cleanTask = cleanText(userMessage);
+  const specialistRoster = specialists
+    .map((agent) => `- ${agent.name}: ${agent.role} (${levelLabel(agent.level)})`)
+    .join("\n");
+
+  return [
+    `You are ${lead.name}, the squad lead in Mission Control.`,
+    buildAgentPersonaBlock(lead),
+    `Mission from HQ: ${cleanTask}`,
+    "Your job is to coordinate specialists, not to do all implementation yourself.",
+    "Specialists available:",
+    specialistRoster || "- None",
+    `Do in strict order:`,
+    `1) ${reportScriptPath} heartbeat ${lead.name} active "Coordinating delegation"`,
+    `2) Create a delegation bulletin and post it in HQ via ${reportScriptPath} chat ${lead.name} "..."`,
+    "3) Bulletin must include 2-4 concise bullets, each assigning one specialist by @Name with a concrete workstream.",
+    `4) Do not provide final solution yet.`,
+    `5) ${reportScriptPath} heartbeat ${lead.name} idle "Delegation issued"`,
+  ].join("\n");
+}
+
+function buildSpecialistPrompt(args: {
+  specialist: AgentRecord;
+  lead: AgentRecord;
+  userMessage: string;
+  leadKickoff: string;
+}) {
+  const cleanTask = cleanText(args.userMessage);
+  const kickoff = cleanText(args.leadKickoff || "No kickoff bulletin captured.");
+  return [
+    `You are ${args.specialist.name} in Mission Control.`,
+    buildAgentPersonaBlock(args.specialist),
+    `HQ mission: ${cleanTask}`,
+    `Lead directive from ${args.lead.name}: ${kickoff}`,
+    `Work only in your specialty (${args.specialist.role}); do not attempt the full cross-domain solution.`,
+    `Do in strict order:`,
+    `1) ${reportScriptPath} heartbeat ${args.specialist.name} active "Executing specialist workstream"`,
+    `2) Perform your specialist work and create concrete output.`,
+    `3) Post update in HQ via ${reportScriptPath} chat ${args.specialist.name} "@${args.lead.name} ${args.specialist.name} update: <key findings + output + open risks>"`,
+    `4) ${reportScriptPath} heartbeat ${args.specialist.name} idle "Specialist update sent"`,
+    "Keep it concise and actionable.",
+  ].join("\n");
+}
+
+function buildLeadSynthesisPrompt(args: {
+  lead: AgentRecord;
+  userMessage: string;
+  specialists: AgentRecord[];
+  specialistUpdates: Array<{ name: string; update: string }>;
+}) {
+  const cleanTask = cleanText(args.userMessage);
+  const updatesText = args.specialistUpdates
+    .map((item) => `- ${item.name}: ${cleanText(item.update || "No update captured")}`)
+    .join("\n");
+  const specialistNames = args.specialists.map((agent) => agent.name).join(", ");
+
+  return [
+    `You are ${args.lead.name}, the squad lead in Mission Control.`,
+    buildAgentPersonaBlock(args.lead),
+    `HQ mission: ${cleanTask}`,
+    `Specialists involved: ${specialistNames || "none"}`,
+    `Collected specialist updates:`,
+    updatesText || "- No specialist updates captured.",
+    `Do in strict order:`,
+    `1) ${reportScriptPath} heartbeat ${args.lead.name} active "Synthesizing team output"`,
+    `2) Post final integrated response in HQ via ${reportScriptPath} chat ${args.lead.name} "FINAL: <integrated answer>\\nTEAM CONTRIBUTIONS: <who did what>\\nNEXT ACTIONS: <clear next steps>"`,
+    `3) ${reportScriptPath} heartbeat ${args.lead.name} idle "Mission response delivered"`,
+    "This final message must credit specialists and provide the concrete final answer for HQ.",
+  ].join("\n");
 }
 
 type OpenClawRunResult = {
@@ -311,7 +496,7 @@ async function runOpenClawAndEnsureReply(args: {
 }
 
 async function selectPendingMessages(channel: string, explicitId?: string) {
-  const messages = await client.query(api.messages.list, { channel });
+  const messages = (await client.query(api.messages.list, { channel })) as OrchestratorMessage[];
   const userMessages = messages.filter((m) => !m.agentId);
 
   if (explicitId) {
@@ -327,6 +512,121 @@ async function selectPendingMessages(channel: string, explicitId?: string) {
   return userMessages.slice(idx + 1);
 }
 
+async function runAgentStage(args: {
+  channel: string;
+  agent: AgentRecord;
+  prompt: string;
+  activeMessage: string;
+  idleMessage: string;
+  messageId: string;
+  stage: string;
+}) {
+  const runtimeAgentId = agentIdFromSessionKey(args.agent.sessionKey);
+  const stageStartedAt = Date.now();
+  console.log(
+    `[team_stage_started] messageId=${args.messageId} stage=${args.stage} agent=${args.agent.name} runtimeAgent=${runtimeAgentId}`
+  );
+
+  await client.mutation(api.agents.updateStatus, {
+    id: args.agent._id,
+    status: "active",
+    message: args.activeMessage,
+  });
+
+  try {
+    await runOpenClawAndEnsureReply({
+      channel: args.channel,
+      agentDbId: args.agent._id,
+      agentName: args.agent.name,
+      agentRuntimeId: runtimeAgentId,
+      thinkingModel: args.agent.models.thinking,
+      prompt: args.prompt,
+    });
+  } finally {
+    await client.mutation(api.agents.updateStatus, {
+      id: args.agent._id,
+      status: "idle",
+      message: args.idleMessage,
+    });
+  }
+
+  const latest = (await getLatestAgentMessageInChannel(args.channel, args.agent._id)) as
+    | (OrchestratorMessage & { text?: string; content?: string })
+    | null;
+  const latestText = (latest?.text ?? latest?.content ?? "").trim();
+
+  console.log(
+    `[team_stage_completed] messageId=${args.messageId} stage=${args.stage} agent=${args.agent.name} durationMs=${
+      Date.now() - stageStartedAt
+    } hasReply=${latestText ? "true" : "false"}`
+  );
+
+  return latestText;
+}
+
+async function runTeamWorkflow(args: {
+  channel: string;
+  message: OrchestratorMessage;
+  lead: AgentRecord;
+  specialists: AgentRecord[];
+}) {
+  const userText = args.message.text || args.message.content || "";
+
+  const kickoffPrompt = buildLeadKickoffPrompt(args.lead, args.specialists, userText);
+  const kickoffText = await runAgentStage({
+    channel: args.channel,
+    agent: args.lead,
+    prompt: kickoffPrompt,
+    activeMessage: "Delegating mission",
+    idleMessage: "Delegation issued",
+    messageId: args.message._id,
+    stage: "lead_kickoff",
+  });
+
+  const specialistUpdates: Array<{ name: string; update: string }> = [];
+  for (const specialist of args.specialists) {
+    const specialistPrompt = buildSpecialistPrompt({
+      specialist,
+      lead: args.lead,
+      userMessage: userText,
+      leadKickoff: kickoffText,
+    });
+    const updateText = await runAgentStage({
+      channel: args.channel,
+      agent: specialist,
+      prompt: specialistPrompt,
+      activeMessage: "Working specialist stream",
+      idleMessage: "Specialist stream complete",
+      messageId: args.message._id,
+      stage: `specialist_${specialist.name.toLowerCase()}`,
+    });
+    specialistUpdates.push({ name: specialist.name, update: updateText });
+  }
+
+  const synthesisPrompt = buildLeadSynthesisPrompt({
+    lead: args.lead,
+    userMessage: userText,
+    specialists: args.specialists,
+    specialistUpdates,
+  });
+
+  const finalText = await runAgentStage({
+    channel: args.channel,
+    agent: args.lead,
+    prompt: synthesisPrompt,
+    activeMessage: "Synthesizing team output",
+    idleMessage: "Mission complete",
+    messageId: args.message._id,
+    stage: "lead_synthesis",
+  });
+
+  return {
+    kickoffText,
+    finalText,
+    specialistUpdates,
+  };
+}
+
 async function main() {
   const { channel, onceMessageId } = parseArgs();
   const pending = await selectPendingMessages(channel, onceMessageId);
@@ -335,51 +635,200 @@ async function main() {
     return;
   }
 
-  const agents = await client.query(api.agents.list);
+  const agents = (await client.query(api.agents.list)) as AgentRecord[];
   const names = agents.map((a) => a.name);
+  const defaultLead = findAgentByName(agents, "Motoko");
 
   for (const msg of pending) {
     const text = msg.text || msg.content || "";
     const mentions = msg.mentions ?? [];
-    const targetName = routeAgentName(text, mentions, names);
-    const target = agents.find((a) => a.name === targetName) ?? agents.find((a) => a.name === "Motoko");
-    if (!target) {
-      console.error(`Cannot route message ${msg._id}: no target agent found`);
+    const startedAt = Date.now();
+
+    const lead = defaultLead;
+    if (!lead) {
+      const targetName = routeAgentName(text, mentions, names);
+      const target = findAgentByName(agents, targetName);
+      if (!target) {
+        console.error(`Cannot route message ${msg._id}: no target agent found`);
+        continue;
+      }
+      const targetAgentId = agentIdFromSessionKey(target.sessionKey);
+      const prompt = buildSingleAgentPrompt(target, text);
+      console.log(`[dispatch_started] messageId=${msg._id} mode=single target=${target.name} agentId=${targetAgentId}`);
+      await client.mutation(api.settings.set, {
+        key: LAST_DISPATCH_STARTED_KEY,
+        value: {
+          at: startedAt,
+          messageId: msg._id,
+          mode: "single",
+          targetName: target.name,
+          targetAgentId,
+        },
+      });
+
+      try {
+        await runAgentStage({
+          channel,
+          agent: target,
+          prompt,
+          activeMessage: "Dispatched by orchestrator",
+          idleMessage: "Awaiting next task",
+          messageId: msg._id,
+          stage: "single_dispatch",
+        });
+        const completedAt = Date.now();
+        console.log(
+          `[dispatch_completed] messageId=${msg._id} mode=single target=${target.name} status=success durationMs=${
+            completedAt - startedAt
+          }`
+        );
+        await client.mutation(api.settings.set, {
+          key: LAST_DISPATCH_RESULT_KEY,
+          value: {
+            at: completedAt,
+            messageId: msg._id,
+            mode: "single",
+            targetName: target.name,
+            targetAgentId,
+            status: "success",
+            durationMs: completedAt - startedAt,
+          },
+        });
+        await client.mutation(api.settings.set, { key: DEDUPE_KEY, value: msg._id });
+      } catch (error) {
+        const completedAt = Date.now();
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[dispatch_completed] messageId=${msg._id} mode=single target=${target.name} status=failed durationMs=${
+            completedAt - startedAt
+          } error=${errorMessage}`
+        );
+        await client.mutation(api.settings.set, {
+          key: LAST_DISPATCH_RESULT_KEY,
+          value: {
+            at: completedAt,
+            messageId: msg._id,
+            mode: "single",
+            targetName: target.name,
+            targetAgentId,
+            status: "failed",
+            durationMs: completedAt - startedAt,
+            error: errorMessage.slice(0, 1000),
+          },
+        });
+        throw error;
+      }
       continue;
     }
 
-    const targetAgentId = agentIdFromSessionKey(target.sessionKey);
-    const prompt = buildPrompt(target.name, text);
-    const startedAt = Date.now();
-    console.log(`[dispatch_started] messageId=${msg._id} target=${target.name} agentId=${targetAgentId}`);
+    const specialists = pickSpecialistsForMission({
+      userMessage: text,
+      mentions,
+      agents,
+      leadName: lead.name,
+    });
+
+    if (specialists.length === 0) {
+      const targetName = routeAgentName(text, mentions, names);
+      const target = findAgentByName(agents, targetName) ?? lead;
+      const targetAgentId = agentIdFromSessionKey(target.sessionKey);
+      const prompt = buildSingleAgentPrompt(target, text);
+      console.log(`[dispatch_started] messageId=${msg._id} mode=single target=${target.name} agentId=${targetAgentId}`);
+      await client.mutation(api.settings.set, {
+        key: LAST_DISPATCH_STARTED_KEY,
+        value: {
+          at: startedAt,
+          messageId: msg._id,
+          mode: "single",
+          targetName: target.name,
+          targetAgentId,
+        },
+      });
+
+      try {
+        await runAgentStage({
+          channel,
+          agent: target,
+          prompt,
+          activeMessage: "Dispatched by orchestrator",
+          idleMessage: "Awaiting next task",
+          messageId: msg._id,
+          stage: "single_dispatch",
+        });
+        const completedAt = Date.now();
+        console.log(
+          `[dispatch_completed] messageId=${msg._id} mode=single target=${target.name} status=success durationMs=${
+            completedAt - startedAt
+          }`
+        );
+        await client.mutation(api.settings.set, {
+          key: LAST_DISPATCH_RESULT_KEY,
+          value: {
+            at: completedAt,
+            messageId: msg._id,
+            mode: "single",
+            targetName: target.name,
+            targetAgentId,
+            status: "success",
+            durationMs: completedAt - startedAt,
+          },
+        });
+        await client.mutation(api.settings.set, { key: DEDUPE_KEY, value: msg._id });
+      } catch (error) {
+        const completedAt = Date.now();
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[dispatch_completed] messageId=${msg._id} mode=single target=${target.name} status=failed durationMs=${
+            completedAt - startedAt
+          } error=${errorMessage}`
+        );
+        await client.mutation(api.settings.set, {
+          key: LAST_DISPATCH_RESULT_KEY,
+          value: {
+            at: completedAt,
+            messageId: msg._id,
+            mode: "single",
+            targetName: target.name,
+            targetAgentId,
+            status: "failed",
+            durationMs: completedAt - startedAt,
+            error: errorMessage.slice(0, 1000),
+          },
+        });
+        throw error;
+      }
+      continue;
+    }
+
+    const leadRuntimeId = agentIdFromSessionKey(lead.sessionKey);
+    console.log(
+      `[dispatch_started] messageId=${msg._id} mode=team lead=${lead.name} specialists=${specialists
+        .map((agent) => agent.name)
+        .join(",")}`
+    );
     await client.mutation(api.settings.set, {
       key: LAST_DISPATCH_STARTED_KEY,
       value: {
         at: startedAt,
         messageId: msg._id,
-        targetName: target.name,
-        targetAgentId,
+        mode: "team",
+        targetName: lead.name,
+        targetAgentId: leadRuntimeId,
+        specialistNames: specialists.map((agent) => agent.name),
       },
     });
 
-    await client.mutation(api.agents.updateStatus, {
-      id: target._id,
-      status: "active",
-      message: "Dispatched by orchestrator",
-    });
-
     try {
-      await runOpenClawAndEnsureReply({
+      const result = await runTeamWorkflow({
         channel,
-        agentDbId: target._id,
-        agentName: target.name,
-        agentRuntimeId: targetAgentId,
-        thinkingModel: target.models.thinking,
-        prompt,
+        message: msg,
+        lead,
+        specialists,
       });
+
       const completedAt = Date.now();
       console.log(
-        `[dispatch_completed] messageId=${msg._id} target=${target.name} status=success durationMs=${
+        `[dispatch_completed] messageId=${msg._id} mode=team lead=${lead.name} status=success durationMs=${
           completedAt - startedAt
         }`
       );
@@ -388,8 +837,15 @@ async function main() {
         value: {
           at: completedAt,
           messageId: msg._id,
-          targetName: target.name,
-          targetAgentId,
+          mode: "team",
+          targetName: lead.name,
+          targetAgentId: leadRuntimeId,
+          specialistNames: specialists.map((agent) => agent.name),
+          specialistUpdates: result.specialistUpdates.map((item) => ({
+            name: item.name,
+            preview: item.update.slice(0, 180),
+          })),
+          finalPreview: result.finalText.slice(0, 180),
           status: "success",
           durationMs: completedAt - startedAt,
         },
@@ -399,7 +855,7 @@ async function main() {
       const completedAt = Date.now();
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(
-        `[dispatch_completed] messageId=${msg._id} target=${target.name} status=failed durationMs=${
+        `[dispatch_completed] messageId=${msg._id} mode=team lead=${lead.name} status=failed durationMs=${
           completedAt - startedAt
         } error=${errorMessage}`
       );
@@ -408,20 +864,16 @@ async function main() {
         value: {
           at: completedAt,
           messageId: msg._id,
-          targetName: target.name,
-          targetAgentId,
+          mode: "team",
+          targetName: lead.name,
+          targetAgentId: leadRuntimeId,
+          specialistNames: specialists.map((agent) => agent.name),
           status: "failed",
           durationMs: completedAt - startedAt,
           error: errorMessage.slice(0, 1000),
         },
       });
       throw error;
-    } finally {
-      await client.mutation(api.agents.updateStatus, {
-        id: target._id,
-        status: "idle",
-        message: "Awaiting next task",
-      });
     }
   }
 }

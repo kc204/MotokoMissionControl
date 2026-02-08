@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
+import AgentStudioPanel from "@/components/AgentStudioPanel";
 
 type AutomationForm = {
   autoDispatchEnabled: boolean;
@@ -218,6 +219,10 @@ export default function SettingsPage() {
           <span className="text-xs text-zinc-400">{status}</span>
         </div>
       </section>
+
+      <div className="mt-6">
+        <AgentStudioPanel />
+      </div>
     </main>
   );
 }

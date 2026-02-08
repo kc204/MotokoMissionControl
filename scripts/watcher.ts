@@ -6,6 +6,7 @@ import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
 import path from "path";
 import {
+  buildTsxCommand,
   loadMissionControlEnv,
   normalizeModelId,
   parseOpenClawJsonOutput,
@@ -32,9 +33,15 @@ const WATCHER_LEASE_RENEW_MS = Number(
 );
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
+const TASK_HQ_COLLAB_ENABLED = process.env.TASK_HQ_COLLAB_ENABLED !== "false";
+const parsedTaskHqSpecialistCount = Number(process.env.TASK_HQ_COLLAB_MAX_SPECIALISTS || 2);
+const TASK_HQ_COLLAB_MAX_SPECIALISTS = Number.isFinite(parsedTaskHqSpecialistCount)
+  ? Math.max(1, Math.floor(parsedTaskHqSpecialistCount))
+  : 2;
 const missionControlRoot = resolveMissionControlRoot();
 const tsxCliPath = path.join(missionControlRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const orchestratorScriptPath = resolveScriptPath("orchestrator.ts");
+const reportScriptPath = buildTsxCommand("report.ts");
 const OPENCLAW_AUTH_PROFILES_PATH =
   process.env.OPENCLAW_AUTH_PROFILES_PATH ||
   path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json");
@@ -307,6 +314,30 @@ type DispatchThreadMessage = {
   text: string;
 };
 
+type AgentRecord = {
+  _id: Id<"agents">;
+  name: string;
+  role: string;
+  level?: "LEAD" | "INT" | "SPC";
+  sessionKey: string;
+  systemPrompt?: string;
+  character?: string;
+  lore?: string;
+  models: {
+    thinking: string;
+    execution?: string;
+    heartbeat: string;
+    fallback: string;
+  };
+};
+
+type MessageRecord = {
+  _id: Id<"messages">;
+  text?: string;
+  content?: string;
+  agentId?: Id<"agents">;
+};
+
 type ClaimedTaskDispatch = {
   dispatchId: Id<"taskDispatches">;
   taskId: Id<"tasks">;
@@ -489,6 +520,336 @@ function extractRunId(payload: unknown): string | undefined {
   return candidates.find((value) => typeof value === "string" && value.trim())?.trim();
 }
 
+function cleanText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function levelLabel(level?: "LEAD" | "INT" | "SPC") {
+  if (level === "LEAD") return "Lead";
+  if (level === "INT") return "Integrator";
+  if (level === "SPC") return "Specialist";
+  return "Specialist";
+}
+
+function buildPersonaBlock(agent: AgentRecord) {
+  const lines = [`${agent.name} Role: ${agent.role} (${levelLabel(agent.level)})`];
+  if (agent.systemPrompt?.trim()) lines.push(`System Prompt: ${cleanText(agent.systemPrompt)}`);
+  if (agent.character?.trim()) lines.push(`Character: ${cleanText(agent.character)}`);
+  if (agent.lore?.trim()) lines.push(`Lore: ${cleanText(agent.lore)}`);
+  return lines.join("\n");
+}
+
+function pickLeadAgent(agents: AgentRecord[], fallback: AgentRecord | null) {
+  return (
+    agents.find((agent) => agent.name === "Motoko") ??
+    agents.find((agent) => agent.level === "LEAD") ??
+    fallback
+  );
+}
+
+function pickTaskSpecialists(args: {
+  dispatch: ClaimedTaskDispatch;
+  agents: AgentRecord[];
+  lead: AgentRecord;
+  target: AgentRecord | null;
+}) {
+  const selected: AgentRecord[] = [];
+  const byName = new Map(args.agents.map((agent) => [agent.name, agent]));
+
+  if (args.target && args.target._id !== args.lead._id) {
+    selected.push(args.target);
+  }
+
+  const lowerText = `${args.dispatch.taskTitle}\n${args.dispatch.taskDescription}\n${args.dispatch.taskTags.join(" ")}`
+    .toLowerCase();
+  const rules: Array<{ name: string; keywords: string[] }> = [
+    { name: "Recon", keywords: ["research", "source", "investigate", "find", "competitor"] },
+    { name: "Forge", keywords: ["code", "build", "deploy", "fix", "bug", "refactor"] },
+    { name: "Quill", keywords: ["write", "copy", "docs", "document", "content"] },
+    { name: "Pulse", keywords: ["metrics", "analytics", "monitor", "performance", "kpi"] },
+  ];
+
+  for (const rule of rules) {
+    if (!rule.keywords.some((keyword) => lowerText.includes(keyword))) continue;
+    const agent = byName.get(rule.name);
+    if (!agent || agent._id === args.lead._id) continue;
+    if (!selected.some((item) => item._id === agent._id)) selected.push(agent);
+  }
+
+  const fallbackOrder = ["Forge", "Recon", "Quill", "Pulse"]
+    .map((name) => byName.get(name))
+    .filter((agent): agent is AgentRecord => !!agent && agent._id !== args.lead._id);
+  for (const fallback of fallbackOrder) {
+    if (selected.some((item) => item._id === fallback._id)) continue;
+    selected.push(fallback);
+    if (selected.length >= TASK_HQ_COLLAB_MAX_SPECIALISTS) break;
+  }
+
+  return selected.slice(0, TASK_HQ_COLLAB_MAX_SPECIALISTS);
+}
+
+function buildTaskLeadKickoffPrompt(args: {
+  lead: AgentRecord;
+  specialists: AgentRecord[];
+  dispatch: ClaimedTaskDispatch;
+}) {
+  const specialistRoster = args.specialists
+    .map((agent) => `- ${agent.name}: ${agent.role} (${levelLabel(agent.level)})`)
+    .join("\n");
+
+  return [
+    `You are ${args.lead.name}, squad lead in Mission Control.`,
+    buildPersonaBlock(args.lead),
+    `Task: ${cleanText(args.dispatch.taskTitle)}`,
+    `Description: ${cleanText(args.dispatch.taskDescription)}`,
+    `Priority: ${args.dispatch.taskPriority}`,
+    args.dispatch.taskTags.length > 0 ? `Tags: ${args.dispatch.taskTags.join(", ")}` : "",
+    "Coordinate specialists. Do not perform full implementation yourself in this stage.",
+    "Specialist roster:",
+    specialistRoster || "- None",
+    "Do in strict order:",
+    `1) ${reportScriptPath} heartbeat ${args.lead.name} active "Planning task delegation"`,
+    `2) ${reportScriptPath} chat ${args.lead.name} "Task plan: @<specialist> owns <workstream>; include 2-4 concise bullets."`,
+    `3) ${reportScriptPath} heartbeat ${args.lead.name} idle "Delegation posted"`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildTaskSpecialistPrompt(args: {
+  specialist: AgentRecord;
+  lead: AgentRecord;
+  dispatch: ClaimedTaskDispatch;
+  leadKickoff: string;
+}) {
+  return [
+    `You are ${args.specialist.name} working inside Mission Control.`,
+    buildPersonaBlock(args.specialist),
+    `Lead directive from ${args.lead.name}: ${cleanText(args.leadKickoff || "No kickoff captured.")}`,
+    `Task: ${cleanText(args.dispatch.taskTitle)}`,
+    `Description: ${cleanText(args.dispatch.taskDescription)}`,
+    "Work only in your specialty and produce actionable output.",
+    "Do in strict order:",
+    `1) ${reportScriptPath} heartbeat ${args.specialist.name} active "Executing specialist stream"`,
+    `2) Perform your specialist analysis/implementation mentally and summarize concrete outcomes.`,
+    `3) ${reportScriptPath} chat ${args.specialist.name} "@${args.lead.name} ${args.specialist.name} update: findings, decisions, blockers, and next step"`,
+    `4) ${reportScriptPath} heartbeat ${args.specialist.name} idle "Specialist update posted"`,
+  ].join("\n");
+}
+
+function buildTaskLeadSynthesisPrompt(args: {
+  lead: AgentRecord;
+  dispatch: ClaimedTaskDispatch;
+  specialistUpdates: Array<{ name: string; text: string }>;
+}) {
+  const specialistUpdatesText = args.specialistUpdates
+    .map((item) => `- ${item.name}: ${cleanText(item.text || "No update captured")}`)
+    .join("\n");
+  return [
+    `You are ${args.lead.name}, squad lead in Mission Control.`,
+    buildPersonaBlock(args.lead),
+    `Task: ${cleanText(args.dispatch.taskTitle)}`,
+    `Description: ${cleanText(args.dispatch.taskDescription)}`,
+    "Specialist updates:",
+    specialistUpdatesText || "- None",
+    "Synthesize and communicate the integrated execution plan for this task.",
+    "Do in strict order:",
+    `1) ${reportScriptPath} heartbeat ${args.lead.name} active "Synthesizing team plan"`,
+    `2) ${reportScriptPath} chat ${args.lead.name} "Team synthesis: consolidated plan, specialist handoffs, and immediate execution next steps"`,
+    `3) ${reportScriptPath} heartbeat ${args.lead.name} idle "Team synthesis posted"`,
+  ].join("\n");
+}
+
+async function getLatestAgentMessageInChannel(channel: string, agentId: Id<"agents">) {
+  const messages = (await client.query(api.messages.list, { channel })) as MessageRecord[];
+  const own = messages.filter((message) => message.agentId === agentId);
+  return own.length === 0 ? null : own[own.length - 1];
+}
+
+async function waitForAgentReply(args: {
+  channel: string;
+  agentDbId: Id<"agents">;
+  beforeMessageId: string | null;
+  timeoutMs?: number;
+  intervalMs?: number;
+}) {
+  const timeoutMs = args.timeoutMs ?? 4000;
+  const intervalMs = args.intervalMs ?? 400;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() <= deadline) {
+    const latest = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
+    if (latest && latest._id !== args.beforeMessageId) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+}
+
+async function persistFallbackHqMessage(args: {
+  channel: string;
+  agent: AgentRecord;
+  assistantText: string;
+}) {
+  const fallbackText = args.assistantText.trim() || "No HQ update from agent.";
+  await client.mutation(api.messages.send, {
+    channel: args.channel,
+    text: fallbackText,
+    agentId: args.agent._id,
+  });
+}
+
+async function ensureHqReplyPersisted(args: {
+  channel: string;
+  agent: AgentRecord;
+  beforeMessageId: string | null;
+  assistantText: string;
+}) {
+  const hasReply = await waitForAgentReply({
+    channel: args.channel,
+    agentDbId: args.agent._id,
+    beforeMessageId: args.beforeMessageId,
+    timeoutMs: 4500,
+    intervalMs: 450,
+  });
+  if (hasReply) return;
+  await persistFallbackHqMessage({
+    channel: args.channel,
+    agent: args.agent,
+    assistantText: args.assistantText,
+  });
+}
+
+async function ensureAgentRuntimeConfig(args: {
+  agent: AgentRecord;
+  activeAuthProfile: ActiveAuthProfile | null;
+}) {
+  const runtimeAgentId = agentIdFromSessionKey(args.agent.sessionKey);
+  await ensureAgentAuthOrder(runtimeAgentId, args.activeAuthProfile);
+  const desiredModel = normalizeModelId(args.agent.models.thinking);
+  if (!desiredModel) return;
+  if (modelCache.get(args.agent.sessionKey) === desiredModel) return;
+  await runOpenClaw(["models", "--agent", runtimeAgentId, "set", desiredModel]);
+  modelCache.set(args.agent.sessionKey, desiredModel);
+}
+
+async function runHqAgentStage(args: {
+  dispatchId: Id<"taskDispatches">;
+  dispatchTaskId: Id<"tasks">;
+  channel: string;
+  agent: AgentRecord;
+  sessionSuffix: string;
+  prompt: string;
+  activeAuthProfile: ActiveAuthProfile | null;
+}) {
+  await ensureAgentRuntimeConfig({ agent: args.agent, activeAuthProfile: args.activeAuthProfile });
+
+  const runtimeAgentId = agentIdFromSessionKey(args.agent.sessionKey);
+  const sessionId = `hq-task-${args.dispatchTaskId}-${args.sessionSuffix}-${runtimeAgentId}`;
+  const before = await getLatestAgentMessageInChannel(args.channel, args.agent._id);
+  const result = await runOpenClawJson<unknown>([
+    "agent",
+    "--agent",
+    runtimeAgentId,
+    "--session-id",
+    sessionId,
+    "--message",
+    args.prompt,
+    "--json",
+  ], {
+    shouldCancel: async () =>
+      await client.query(api.tasks.shouldCancelDispatch, {
+        dispatchId: args.dispatchId,
+      }),
+    cancelCheckMs: 750,
+  });
+
+  const assistantText = extractAssistantText(result);
+  await ensureHqReplyPersisted({
+    channel: args.channel,
+    agent: args.agent,
+    beforeMessageId: before?._id ?? null,
+    assistantText,
+  });
+
+  const latest = await getLatestAgentMessageInChannel(args.channel, args.agent._id);
+  return (latest?.text ?? latest?.content ?? "").trim();
+}
+
+async function runTaskHqCollaboration(args: {
+  dispatch: ClaimedTaskDispatch;
+  activeAuthProfile: ActiveAuthProfile | null;
+}) {
+  if (!TASK_HQ_COLLAB_ENABLED) return;
+
+  const agents = (await client.query(api.agents.list)) as AgentRecord[];
+  if (agents.length === 0) return;
+
+  const target = agents.find((agent) => agent._id === args.dispatch.targetAgentId) ?? null;
+  const lead = pickLeadAgent(agents, target);
+  if (!lead) return;
+
+  const specialists = pickTaskSpecialists({
+    dispatch: args.dispatch,
+    agents,
+    lead,
+    target,
+  });
+
+  console.log(
+    `[task_hq_collab] dispatchId=${args.dispatch.dispatchId} lead=${lead.name} specialists=${specialists
+      .map((agent) => agent.name)
+      .join(",") || "-"}`
+  );
+
+  const kickoffText = await runHqAgentStage({
+    dispatchId: args.dispatch.dispatchId,
+    dispatchTaskId: args.dispatch.taskId,
+    channel: "hq",
+    agent: lead,
+    sessionSuffix: "kickoff",
+    prompt: buildTaskLeadKickoffPrompt({
+      lead,
+      specialists,
+      dispatch: args.dispatch,
+    }),
+    activeAuthProfile: args.activeAuthProfile,
+  });
+
+  const specialistUpdates: Array<{ name: string; text: string }> = [];
+  for (const specialist of specialists) {
+    const text = await runHqAgentStage({
+      dispatchId: args.dispatch.dispatchId,
+      dispatchTaskId: args.dispatch.taskId,
+      channel: "hq",
+      agent: specialist,
+      sessionSuffix: `spec-${specialist.name.toLowerCase()}`,
+      prompt: buildTaskSpecialistPrompt({
+        specialist,
+        lead,
+        dispatch: args.dispatch,
+        leadKickoff: kickoffText,
+      }),
+      activeAuthProfile: args.activeAuthProfile,
+    });
+    specialistUpdates.push({ name: specialist.name, text });
+  }
+
+  await runHqAgentStage({
+    dispatchId: args.dispatch.dispatchId,
+    dispatchTaskId: args.dispatch.taskId,
+    channel: "hq",
+    agent: lead,
+    sessionSuffix: "synthesis",
+    prompt: buildTaskLeadSynthesisPrompt({
+      lead,
+      dispatch: args.dispatch,
+      specialistUpdates,
+    }),
+    activeAuthProfile: args.activeAuthProfile,
+  });
+}
+
 function buildTaskDispatchPrompt(dispatch: ClaimedTaskDispatch): string {
   const lines: string[] = [];
   lines.push(`Assigned Agent: ${dispatch.targetAgentName} (${dispatch.targetAgentRole}, ${dispatch.targetAgentLevel})`);
@@ -571,6 +932,20 @@ async function processTaskDispatchQueue() {
     }
 
     const activeAuthProfile = await getActiveAuthProfile();
+
+    try {
+      await runTaskHqCollaboration({
+        dispatch,
+        activeAuthProfile,
+      });
+    } catch (error) {
+      const collabError = error instanceof Error ? error.message : String(error);
+      if (collabError === "Dispatch cancelled") throw error;
+      console.error(
+        `[task_hq_collab_failed] dispatchId=${dispatch.dispatchId} taskId=${dispatch.taskId} error=${collabError}`
+      );
+    }
+
     await ensureAgentAuthOrder(runtimeAgentId, activeAuthProfile);
 
     // Enforce the selected model when changed to avoid unnecessary config churn.
