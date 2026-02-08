@@ -5,10 +5,11 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 
-const statusOptions: Array<{ value: "inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked" | "archived"; label: string }> = [
+const statusOptions: Array<{ value: "inbox" | "assigned" | "in_progress" | "testing" | "review" | "done" | "blocked" | "archived"; label: string }> = [
   { value: "inbox", label: "Inbox" },
   { value: "assigned", label: "Assigned" },
   { value: "in_progress", label: "In Progress" },
+  { value: "testing", label: "Testing" },
   { value: "review", label: "Review" },
   { value: "done", label: "Done" },
   { value: "blocked", label: "Blocked" },
@@ -83,7 +84,7 @@ export default function TaskDetailPanel({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<"low" | "medium" | "high" | "urgent">("medium");
-  const [status, setStatus] = useState<"inbox" | "assigned" | "in_progress" | "review" | "done" | "blocked" | "archived">("inbox");
+  const [status, setStatus] = useState<"inbox" | "assigned" | "in_progress" | "testing" | "review" | "done" | "blocked" | "archived">("inbox");
   const [assignees, setAssignees] = useState<Id<"agents">[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");

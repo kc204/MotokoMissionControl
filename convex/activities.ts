@@ -1,5 +1,18 @@
-import { query } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+
+const activityType = v.union(
+  v.literal("task_created"),
+  v.literal("task_updated"),
+  v.literal("message_sent"),
+  v.literal("agent_status_changed"),
+  v.literal("document_created"),
+  v.literal("dispatch_started"),
+  v.literal("dispatch_completed"),
+  v.literal("testing_result"),
+  v.literal("planning_update"),
+  v.literal("subagent_update")
+);
 
 export const recent = query({
   args: { limit: v.optional(v.number()) },
@@ -41,13 +54,7 @@ export const listFiltered = query({
   args: {
     limit: v.optional(v.number()),
     type: v.optional(
-      v.union(
-        v.literal("task_created"),
-        v.literal("task_updated"),
-        v.literal("message_sent"),
-        v.literal("agent_status_changed"),
-        v.literal("document_created")
-      )
+      activityType
     ),
     agentId: v.optional(v.id("agents")),
   },
@@ -61,5 +68,22 @@ export const listFiltered = query({
       rows = rows.filter((row) => row.agentId === args.agentId);
     }
     return rows;
+  },
+});
+
+export const log = mutation({
+  args: {
+    type: activityType,
+    message: v.string(),
+    taskId: v.optional(v.id("tasks")),
+    agentId: v.optional(v.id("agents")),
+    projectId: v.optional(v.id("projects")),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("activities", {
+      ...args,
+      message: args.message.trim(),
+      createdAt: Date.now(),
+    });
   },
 });

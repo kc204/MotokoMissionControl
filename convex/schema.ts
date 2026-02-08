@@ -44,6 +44,7 @@ export default defineSchema({
       v.literal("inbox"),
       v.literal("assigned"),
       v.literal("in_progress"),
+      v.literal("testing"),
       v.literal("review"),
       v.literal("done"),
       v.literal("blocked"),
@@ -68,8 +69,21 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
     completedAt: v.optional(v.number()),
+    planningStatus: v.optional(
+      v.union(
+        v.literal("none"),
+        v.literal("questions"),
+        v.literal("ready"),
+        v.literal("approved")
+      )
+    ),
+    planningQuestions: v.optional(v.array(v.string())),
+    planningDraft: v.optional(v.string()),
+    planningUpdatedAt: v.optional(v.number()),
+    planningApprovedAt: v.optional(v.number()),
   })
     .index("by_status", ["status"])
+    .index("by_planningStatus", ["planningStatus"])
     .index("by_openclawRunId", ["openclawRunId"])
     .index("by_sessionKey", ["sessionKey"])
     .index("by_createdAt", ["createdAt"])
@@ -94,7 +108,12 @@ export default defineSchema({
       v.literal("task_updated"),
       v.literal("message_sent"),
       v.literal("agent_status_changed"),
-      v.literal("document_created")
+      v.literal("document_created"),
+      v.literal("dispatch_started"),
+      v.literal("dispatch_completed"),
+      v.literal("testing_result"),
+      v.literal("planning_update"),
+      v.literal("subagent_update")
     ),
     agentId: v.optional(v.id("agents")),
     taskId: v.optional(v.id("tasks")),
@@ -161,6 +180,7 @@ export default defineSchema({
     targetAgentId: v.optional(v.id("agents")),
     requestedBy: v.string(),
     prompt: v.optional(v.string()),
+    idempotencyKey: v.optional(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("running"),
@@ -182,6 +202,7 @@ export default defineSchema({
     finishedAt: v.optional(v.number()),
   })
     .index("by_taskId", ["taskId"])
+    .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_status_requestedAt", ["status", "requestedAt"]),
   settings: defineTable({
     key: v.string(),

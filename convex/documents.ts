@@ -20,6 +20,17 @@ export const byTask = query({
   },
 });
 
+export const hasDeliverable = query({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("documents")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+      .collect();
+    return rows.some((doc) => doc.type === "deliverable");
+  },
+});
+
 export const listAll = query({
   args: {
     type: v.optional(documentType),
@@ -131,6 +142,47 @@ export const create = mutation({
       taskId: args.taskId,
       projectId: args.projectId,
       message: `Document created: "${args.title}"`,
+      createdAt: now,
+    });
+
+    return id;
+  },
+});
+
+export const createDeliverable = mutation({
+  args: {
+    title: v.string(),
+    content: v.string(),
+    taskId: v.id("tasks"),
+    createdBy: v.string(),
+    createdByAgentId: v.optional(v.id("agents")),
+    messageId: v.optional(v.id("messages")),
+    path: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+
+    const id = await ctx.db.insert("documents", {
+      title: args.title,
+      content: args.content,
+      type: "deliverable",
+      path: args.path,
+      taskId: args.taskId,
+      projectId: task.projectId,
+      createdBy: args.createdBy,
+      createdByAgentId: args.createdByAgentId,
+      messageId: args.messageId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("activities", {
+      type: "document_created",
+      taskId: args.taskId,
+      projectId: task.projectId,
+      message: `Deliverable created: "${args.title}"`,
       createdAt: now,
     });
 

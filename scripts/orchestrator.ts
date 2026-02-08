@@ -8,6 +8,7 @@ import {
   loadMissionControlEnv,
   normalizeModelId,
   parseOpenClawJsonOutput,
+  resolveModelFromCatalog,
 } from "./lib/mission-control";
 
 loadMissionControlEnv();
@@ -24,10 +25,17 @@ const LAST_REPORT_CHAT_KEY = "probe:last_report_chat_write";
 const reportScriptPath = buildTsxCommand("report.ts");
 const ORCHESTRATOR_MIN_SPECIALISTS = Math.max(1, Number(process.env.ORCHESTRATOR_MIN_SPECIALISTS || 2));
 const ORCHESTRATOR_FAILOVER_ENABLED = process.env.ORCHESTRATOR_FAILOVER_ENABLED !== "false";
+const SESSION_LEASE_KEY_PREFIX = "openclaw:session:";
+const SESSION_LEASE_TTL_MS = Math.max(30_000, Number(process.env.SESSION_LEASE_TTL_MS || 10 * 60 * 1000));
+const SESSION_LEASE_WAIT_MS = Math.max(2_000, Number(process.env.SESSION_LEASE_WAIT_MS || 20_000));
+const SESSION_LEASE_POLL_MS = Math.max(250, Number(process.env.SESSION_LEASE_POLL_MS || 500));
+const orchestratorInstanceId = `${os.hostname()}:${process.pid}`;
 
 const client = new ConvexHttpClient(convexUrl);
 const runtimeModelCache = new Map<string, string>();
 const runtimeAuthCache = new Map<string, string>();
+let availableModelIds = new Set<string>();
+let hasLoadedModelCatalog = false;
 
 type AgentRecord = {
   _id: Id<"agents">;
@@ -58,6 +66,43 @@ type AuthProfileCandidate = {
   provider: string;
   profileId: string;
 };
+
+function extractModelIds(payload: unknown) {
+  const out = new Set<string>();
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      if (trimmed.includes("/") || /^[a-z0-9._-]+$/i.test(trimmed)) out.add(trimmed);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.id === "string") out.add(obj.id.trim());
+    if (typeof obj.model === "string") out.add(obj.model.trim());
+    if (typeof obj.name === "string" && obj.name.includes("/")) out.add(obj.name.trim());
+    for (const nested of Object.values(obj)) visit(nested);
+  };
+  visit(payload);
+  return out;
+}
+
+async function refreshModelCatalog() {
+  try {
+    const payload = await runOpenClawJson<unknown>(["models", "list", "--json"]);
+    const next = extractModelIds(payload);
+    if (next.size > 0) {
+      availableModelIds = next;
+      hasLoadedModelCatalog = true;
+    }
+  } catch {
+    // Best effort; keep running with raw model ids.
+  }
+}
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -399,9 +444,61 @@ async function runOpenClawAgentCommand(args: string[]): Promise<void> {
   });
 }
 
-async function runOpenClawAgent(agentId: string, prompt: string): Promise<OpenClawRunResult> {
+async function runOpenClawJson<T>(args: string[]): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const child = spawnOpenClaw(args);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => {
+      if (code === 0) {
+        try {
+          resolve(parseOpenClawJsonOutput<T>(stdout));
+          return;
+        } catch (error) {
+          reject(error);
+          return;
+        }
+      }
+      reject(new Error(stderr || `openclaw exited with code ${code}`));
+    });
+  });
+}
+
+async function withSessionLease<T>(sessionId: string, owner: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${SESSION_LEASE_KEY_PREFIX}${sessionId}`;
+  const deadline = Date.now() + SESSION_LEASE_WAIT_MS;
+  let acquired = false;
+  while (!acquired) {
+    const lease = await client.mutation(api.settings.acquireLease, {
+      key,
+      owner,
+      ttlMs: SESSION_LEASE_TTL_MS,
+    });
+    acquired = lease.acquired;
+    if (acquired) break;
+    if (Date.now() >= deadline) {
+      throw new Error(`session lease timeout for ${sessionId}: owner=${lease.owner ?? "unknown"}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, SESSION_LEASE_POLL_MS));
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await client.mutation(api.settings.releaseLease, { key, owner }).catch(() => undefined);
+  }
+}
+
+async function runOpenClawAgent(agentId: string, sessionId: string, prompt: string): Promise<OpenClawRunResult> {
   return await new Promise<OpenClawRunResult>((resolve, reject) => {
-    const args = ["agent", "--agent", agentId, "--message", prompt, "--json"];
+    const args = ["agent", "--agent", agentId, "--session-id", sessionId, "--message", prompt, "--json"];
     const child = spawnOpenClaw(args);
     let stdout = "";
     let stderr = "";
@@ -507,15 +604,19 @@ async function runOpenClawAndEnsureReply(args: {
   agentDbId: Id<"agents">;
   agentName: string;
   agentRuntimeId: string;
+  sessionId: string;
   thinkingModel: string;
   fallbackModel?: string;
   prompt: string;
 }) {
   const before = await getLatestAgentMessageInChannel(args.channel, args.agentDbId);
+  if (!hasLoadedModelCatalog) {
+    await refreshModelCatalog();
+  }
 
   const modelCandidates = [
-    normalizeModelId(args.thinkingModel),
-    normalizeModelId(args.fallbackModel ?? ""),
+    resolveModelFromCatalog(normalizeModelId(args.thinkingModel), availableModelIds),
+    resolveModelFromCatalog(normalizeModelId(args.fallbackModel ?? ""), availableModelIds),
   ].filter((model, index, all) => !!model && all.indexOf(model) === index);
 
   const authCandidates = ORCHESTRATOR_FAILOVER_ENABLED
@@ -545,7 +646,11 @@ async function runOpenClawAndEnsureReply(args: {
         thinkingModel: attempt.model,
         authProfile: attempt.auth,
       });
-      const result = await runOpenClawAgent(args.agentRuntimeId, args.prompt);
+      const result = await withSessionLease(
+        args.sessionId,
+        `${orchestratorInstanceId}:${args.agentRuntimeId}:${args.sessionId}`,
+        async () => await runOpenClawAgent(args.agentRuntimeId, args.sessionId, args.prompt)
+      );
       await ensureHqReplyPersisted({
         channel: args.channel,
         agentDbId: args.agentDbId,
@@ -647,11 +752,13 @@ async function runAgentStage(args: {
   });
 
   try {
+    const sessionId = `hq-${args.messageId}-${args.stage}-${runtimeAgentId}`;
     await runOpenClawAndEnsureReply({
       channel: args.channel,
       agentDbId: args.agent._id,
       agentName: args.agent.name,
       agentRuntimeId: runtimeAgentId,
+      sessionId,
       thinkingModel: args.agent.models.thinking,
       fallbackModel: args.agent.models.fallback,
       prompt: args.prompt,

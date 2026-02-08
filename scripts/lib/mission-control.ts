@@ -42,6 +42,26 @@ export function normalizeModelId(modelId?: string | null) {
   return trimmed;
 }
 
+export function resolveModelFromCatalog(
+  requestedModel: string,
+  availableModels: Set<string>
+) {
+  const requested = normalizeModelId(requestedModel);
+  if (!requested || availableModels.size === 0) return requested;
+  if (availableModels.has(requested)) return requested;
+
+  const suffixMatches = [...availableModels].filter((id) => id.endsWith(`/${requested}`));
+  if (suffixMatches.length === 0) return requested;
+  if (requested !== "codex-cli") return suffixMatches[0];
+
+  const preferredOrder = ["openai/", "google-antigravity/", "google/", "anthropic/"];
+  for (const prefix of preferredOrder) {
+    const match = suffixMatches.find((id) => id.startsWith(prefix));
+    if (match) return match;
+  }
+  return suffixMatches[0];
+}
+
 export function parseOpenClawJsonOutput<T>(stdout: string): T {
   const raw = stdout.trim();
   if (!raw) {
@@ -51,6 +71,15 @@ export function parseOpenClawJsonOutput<T>(stdout: string): T {
   try {
     return JSON.parse(raw) as T;
   } catch {
+    const fencedMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fencedMatch?.[1]) {
+      try {
+        return JSON.parse(fencedMatch[1]) as T;
+      } catch {
+        // Fall through to loose extraction.
+      }
+    }
+
     const objectStart = raw.indexOf("{");
     const arrayStart = raw.indexOf("[");
     const candidates = [objectStart, arrayStart].filter((index) => index >= 0);
@@ -58,6 +87,18 @@ export function parseOpenClawJsonOutput<T>(stdout: string): T {
       throw new Error("No JSON payload found in output");
     }
     const start = Math.min(...candidates);
-    return JSON.parse(raw.slice(start)) as T;
+    const sliced = raw.slice(start);
+    try {
+      return JSON.parse(sliced) as T;
+    } catch {
+      const objectEnd = sliced.lastIndexOf("}");
+      const arrayEnd = sliced.lastIndexOf("]");
+      const ends = [objectEnd, arrayEnd].filter((index) => index >= 0);
+      if (ends.length === 0) {
+        throw new Error("No bounded JSON payload found in output");
+      }
+      const end = Math.max(...ends);
+      return JSON.parse(sliced.slice(0, end + 1)) as T;
+    }
   }
 }

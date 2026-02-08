@@ -23,13 +23,14 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useMemo, useState } from "react";
 
-const BASE_COLUMNS = ["inbox", "assigned", "in_progress", "review", "done"] as const;
+const BASE_COLUMNS = ["inbox", "assigned", "in_progress", "testing", "review", "done"] as const;
 const ARCHIVE_COLUMN = "archived" as const;
 type ColumnStatus = (typeof BASE_COLUMNS)[number] | typeof ARCHIVE_COLUMN;
 type TaskStatus =
   | "inbox"
   | "assigned"
   | "in_progress"
+  | "testing"
   | "review"
   | "done"
   | "blocked"
@@ -39,6 +40,7 @@ const LABELS: Record<ColumnStatus, string> = {
   inbox: "Inbox",
   assigned: "Assigned",
   in_progress: "In Progress",
+  testing: "Testing",
   review: "Review",
   done: "Done",
   archived: "Archived",
@@ -48,6 +50,7 @@ const columnAccent: Record<ColumnStatus, string> = {
   inbox: "from-zinc-500/20 to-zinc-500/0",
   assigned: "from-indigo-500/20 to-indigo-500/0",
   in_progress: "from-cyan-500/20 to-cyan-500/0",
+  testing: "from-fuchsia-500/20 to-fuchsia-500/0",
   review: "from-amber-500/20 to-amber-500/0",
   done: "from-emerald-500/20 to-emerald-500/0",
   archived: "from-zinc-700/25 to-zinc-700/0",

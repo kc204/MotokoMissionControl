@@ -10,6 +10,7 @@ import {
   loadMissionControlEnv,
   normalizeModelId,
   parseOpenClawJsonOutput,
+  resolveModelFromCatalog,
   resolveMissionControlRoot,
   resolveScriptPath,
 } from "./lib/mission-control";
@@ -34,11 +35,20 @@ const WATCHER_LEASE_RENEW_MS = Number(
 const MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
 const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const WATCHER_MESSAGE_RETRY_STATE_KEY = "watcher:message_retry_state";
+const WATCHER_MESSAGE_DEAD_LETTER_KEY = "watcher:message_dead_letters";
 const WATCHER_MESSAGE_MAX_RETRIES = Math.max(1, Number(process.env.WATCHER_MESSAGE_MAX_RETRIES || 3));
 const WATCHER_MESSAGE_RETRY_STATE_LIMIT = Math.max(
   50,
   Number(process.env.WATCHER_MESSAGE_RETRY_STATE_LIMIT || 300)
 );
+const WATCHER_DEAD_LETTER_LIMIT = Math.max(
+  50,
+  Number(process.env.WATCHER_DEAD_LETTER_LIMIT || 300)
+);
+const SESSION_LEASE_KEY_PREFIX = "openclaw:session:";
+const SESSION_LEASE_TTL_MS = Math.max(30_000, Number(process.env.SESSION_LEASE_TTL_MS || 10 * 60 * 1000));
+const SESSION_LEASE_WAIT_MS = Math.max(2_000, Number(process.env.SESSION_LEASE_WAIT_MS || 20_000));
+const SESSION_LEASE_POLL_MS = Math.max(250, Number(process.env.SESSION_LEASE_POLL_MS || 500));
 const TASK_HQ_COLLAB_ENABLED = process.env.TASK_HQ_COLLAB_ENABLED !== "false";
 const WATCHER_FAILOVER_ENABLED = process.env.WATCHER_FAILOVER_ENABLED !== "false";
 const parsedTaskHqMinSpecialists = Number(process.env.TASK_HQ_COLLAB_MIN_SPECIALISTS || 2);
@@ -74,6 +84,11 @@ let autoDispatchEnabled = true;
 let authProfileDiscoverySignature: string | null = null;
 let hasLoadedRetryState = false;
 let retryStateByMessageId: Record<string, { attempts: number; lastError: string; updatedAt: number }> = {};
+let hasLoadedDeadLetters = false;
+let deadLettersByMessageId: Record<
+  string,
+  { attempts: number; reason: string; error: string; updatedAt: number }
+> = {};
 let availableModelIds = new Set<string>();
 let hasLoadedModelCatalog = false;
 
@@ -381,6 +396,97 @@ async function ensureRetryStateLoaded() {
   }
 }
 
+async function ensureDeadLettersLoaded() {
+  if (hasLoadedDeadLetters) return;
+  hasLoadedDeadLetters = true;
+  try {
+    const row = await client.query(api.settings.get, { key: WATCHER_MESSAGE_DEAD_LETTER_KEY });
+    const value = row?.value;
+    if (!value || typeof value !== "object") {
+      deadLettersByMessageId = {};
+      return;
+    }
+    const parsed: Record<
+      string,
+      { attempts: number; reason: string; error: string; updatedAt: number }
+    > = {};
+    for (const [messageId, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const attempts = Number(record.attempts || 0);
+      const reason = typeof record.reason === "string" ? record.reason : "unknown";
+      const error = typeof record.error === "string" ? record.error : "";
+      const updatedAt = Number(record.updatedAt || 0);
+      if (!messageId || !Number.isFinite(attempts) || attempts <= 0) continue;
+      parsed[messageId] = {
+        attempts: Math.max(1, Math.floor(attempts)),
+        reason,
+        error,
+        updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+      };
+    }
+    deadLettersByMessageId = parsed;
+  } catch (error) {
+    console.error("[dispatch] failed to load dead letters:", error);
+    deadLettersByMessageId = {};
+  }
+}
+
+async function persistDeadLetters() {
+  const entries = Object.entries(deadLettersByMessageId).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+  const trimmed = entries.slice(0, WATCHER_DEAD_LETTER_LIMIT);
+  deadLettersByMessageId = Object.fromEntries(trimmed);
+  await client.mutation(api.settings.set, {
+    key: WATCHER_MESSAGE_DEAD_LETTER_KEY,
+    value: deadLettersByMessageId,
+  });
+}
+
+async function recordDeadLetter(messageId: string, reason: string, attempts: number, error: string) {
+  await ensureDeadLettersLoaded();
+  deadLettersByMessageId[messageId] = {
+    attempts: Math.max(1, attempts),
+    reason: reason.slice(0, 120),
+    error: error.slice(0, 1000),
+    updatedAt: Date.now(),
+  };
+  await persistDeadLetters();
+}
+
+async function clearDeadLetter(messageId: string) {
+  await ensureDeadLettersLoaded();
+  if (!(messageId in deadLettersByMessageId)) return;
+  delete deadLettersByMessageId[messageId];
+  await persistDeadLetters();
+}
+
+async function withSessionLease<T>(sessionId: string, owner: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${SESSION_LEASE_KEY_PREFIX}${sessionId}`;
+  const deadline = Date.now() + SESSION_LEASE_WAIT_MS;
+  let acquired = false;
+  while (!acquired) {
+    const lease = await client.mutation(api.settings.acquireLease, {
+      key,
+      owner,
+      ttlMs: SESSION_LEASE_TTL_MS,
+    });
+    acquired = lease.acquired;
+    if (acquired) break;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `session lease timeout for ${sessionId}: owner=${lease.owner ?? "unknown"}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, SESSION_LEASE_POLL_MS));
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await client.mutation(api.settings.releaseLease, { key, owner }).catch(() => undefined);
+  }
+}
+
 async function persistRetryState() {
   const entries = Object.entries(retryStateByMessageId).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
   const trimmed = entries.slice(0, WATCHER_MESSAGE_RETRY_STATE_LIMIT);
@@ -433,8 +539,9 @@ async function syncModels() {
     const key = agent.sessionKey;
     const desired = normalizeModelId(agent.models.thinking);
     if (!desired) continue;
+    const desiredResolved = resolveModelFromCatalog(desired, availableModelIds);
     const lastKnown = modelCache.get(key);
-    if (lastKnown === desired) continue;
+    if (lastKnown === desiredResolved) continue;
 
     const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
     const modelPath = modelPathByAgentId.get(openclawAgentId);
@@ -442,17 +549,17 @@ async function syncModels() {
 
     try {
       if (modelPath) {
-        await runOpenClaw(["config", "set", modelPath, desired]);
+        await runOpenClaw(["config", "set", modelPath, desiredResolved]);
         configPersisted = true;
       } else {
         console.warn(`[model] config path missing for ${agent.name} (${openclawAgentId}), applying runtime only`);
       }
 
       // Also apply through models command for immediate runtime alignment.
-      await runOpenClaw(["models", "--agent", openclawAgentId, "set", desired]);
-      modelCache.set(key, desired);
+      await runOpenClaw(["models", "--agent", openclawAgentId, "set", desiredResolved]);
+      modelCache.set(key, desiredResolved);
       console.log(
-        `[model] ${agent.name} (${openclawAgentId}) -> ${desired} persisted=${configPersisted}`
+        `[model] ${agent.name} (${openclawAgentId}) -> ${desiredResolved} persisted=${configPersisted}`
       );
     } catch (error) {
       console.error(`[model] failed for ${agent.name}:`, error);
@@ -718,8 +825,10 @@ async function runOpenClawAgentWithFailover(args: {
   preferredAuthProfile: ActiveAuthProfile | null;
 }) {
   const modelCandidates = [
-    normalizeModelId(args.primaryModel),
-    WATCHER_FAILOVER_ENABLED ? normalizeModelId(args.fallbackModel ?? "") : "",
+    resolveModelFromCatalog(normalizeModelId(args.primaryModel), availableModelIds),
+    WATCHER_FAILOVER_ENABLED
+      ? resolveModelFromCatalog(normalizeModelId(args.fallbackModel ?? ""), availableModelIds)
+      : "",
   ].filter((model, index, all) => !!model && all.indexOf(model) === index);
 
   const authCandidates = WATCHER_FAILOVER_ENABLED
@@ -734,7 +843,9 @@ async function runOpenClawAgentWithFailover(args: {
   }
   if (attempts.length === 0) {
     attempts.push({
-      model: normalizeModelId(args.primaryModel) || args.primaryModel,
+      model:
+        resolveModelFromCatalog(normalizeModelId(args.primaryModel), availableModelIds) ||
+        args.primaryModel,
       auth: args.preferredAuthProfile,
     });
   }
@@ -754,22 +865,27 @@ async function runOpenClawAgentWithFailover(args: {
         modelCache.set(args.modelCacheKey, attempt.model);
       }
 
-      return await runOpenClawJson<unknown>([
-        "agent",
-        "--agent",
-        args.runtimeAgentId,
-        "--session-id",
+      return await withSessionLease(
         args.sessionId,
-        "--message",
-        args.prompt,
-        "--json",
-      ], {
-        shouldCancel: async () =>
-          await client.query(api.tasks.shouldCancelDispatch, {
-            dispatchId: args.dispatchId,
-          }),
-        cancelCheckMs: 750,
-      });
+        `${watcherInstanceId}:${String(args.dispatchId)}:${args.runtimeAgentId}`,
+        async () =>
+          await runOpenClawJson<unknown>([
+            "agent",
+            "--agent",
+            args.runtimeAgentId,
+            "--session-id",
+            args.sessionId,
+            "--message",
+            args.prompt,
+            "--json",
+          ], {
+            shouldCancel: async () =>
+              await client.query(api.tasks.shouldCancelDispatch, {
+                dispatchId: args.dispatchId,
+              }),
+            cancelCheckMs: 750,
+          })
+      );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (errorMessage === "Dispatch cancelled") {
@@ -1248,7 +1364,7 @@ async function processTaskDispatchQueue() {
 
   const runtimeAgentId = agentIdFromSessionKey(dispatch.targetSessionKey);
   const targetThinkingModel = normalizeModelId(dispatch.targetThinkingModel);
-  const sessionId = `mission-${dispatch.taskId}`;
+  const sessionId = `mission-${dispatch.taskId}-${dispatch.dispatchId}`;
   const prompt = buildTaskDispatchPrompt(dispatch);
   const startedAt = Date.now();
   console.log(
@@ -1423,6 +1539,12 @@ async function checkAndDispatchNewUserMessage() {
 
   const retryState = retryStateByMessageId[newestUserMessage._id];
   if (retryState && retryState.attempts >= WATCHER_MESSAGE_MAX_RETRIES) {
+    await recordDeadLetter(
+      newestUserMessage._id,
+      "max_retries",
+      retryState.attempts,
+      retryState.lastError || "max retries exceeded"
+    );
     console.warn(
       `[dispatch_dead_letter] messageId=${newestUserMessage._id} attempts=${retryState.attempts} reason=max_retries`
     );
@@ -1438,6 +1560,7 @@ async function checkAndDispatchNewUserMessage() {
   try {
     await triggerOrchestrator(newestUserMessage._id);
     await clearMessageDispatchFailure(newestUserMessage._id);
+    await clearDeadLetter(newestUserMessage._id);
     lastSeenUserMessageId = newestUserMessage._id;
     await client.mutation(api.settings.set, {
       key: WATCHER_LAST_SEEN_USER_MESSAGE_KEY,
@@ -1449,6 +1572,12 @@ async function checkAndDispatchNewUserMessage() {
     const attempts = retryStateByMessageId[newestUserMessage._id]?.attempts ?? 1;
     const permanent = isPermanentDispatchError(errorMessage);
     if (permanent || attempts >= WATCHER_MESSAGE_MAX_RETRIES) {
+      await recordDeadLetter(
+        newestUserMessage._id,
+        permanent ? "permanent_error" : "max_retries",
+        attempts,
+        errorMessage
+      );
       console.warn(
         `[dispatch_dead_letter] messageId=${newestUserMessage._id} attempts=${attempts} reason=${
           permanent ? "permanent_error" : "max_retries"

@@ -25,9 +25,10 @@ export default function KanbanPage() {
 
   const stats = useMemo(() => {
     const inProgress = tasks.filter((t) => t.status === "in_progress").length;
+    const testing = tasks.filter((t) => t.status === "testing").length;
     const review = tasks.filter((t) => t.status === "review").length;
     const done = tasks.filter((t) => t.status === "done").length;
-    return { total: tasks.length, inProgress, review, done };
+    return { total: tasks.length, inProgress, testing, review, done };
   }, [tasks]);
 
   useEffect(() => {
@@ -79,6 +80,9 @@ export default function KanbanPage() {
               <span className="text-zinc-700">|</span>
               <span className="text-xs uppercase tracking-wider text-zinc-500">In Progress</span>
               <span className="font-mono text-sm text-cyan-300">{stats.inProgress}</span>
+              <span className="text-zinc-700">|</span>
+              <span className="text-xs uppercase tracking-wider text-zinc-500">Testing</span>
+              <span className="font-mono text-sm text-fuchsia-300">{stats.testing}</span>
               <span className="text-zinc-700">|</span>
               <span className="text-xs uppercase tracking-wider text-zinc-500">Review</span>
               <span className="font-mono text-sm text-amber-300">{stats.review}</span>

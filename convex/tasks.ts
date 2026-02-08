@@ -1,10 +1,12 @@
 import { query, mutation } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 
 const taskStatus = v.union(
   v.literal("inbox"),
   v.literal("assigned"),
   v.literal("in_progress"),
+  v.literal("testing"),
   v.literal("review"),
   v.literal("done"),
   v.literal("blocked"),
@@ -41,10 +43,76 @@ function extractMessageText(message: {
   return (message.content ?? message.text ?? "").trim();
 }
 
+async function hasTaskDeliverable(ctx: any, taskId: Id<"tasks">) {
+  const docs = await ctx.db
+    .query("documents")
+    .withIndex("by_taskId", (q: any) => q.eq("taskId", taskId))
+    .collect();
+  return docs.some((doc: { type?: string }) => doc.type === "deliverable");
+}
+
+function requiresPlanningApproval(task: {
+  planningStatus?: "none" | "questions" | "ready" | "approved";
+}) {
+  return task.planningStatus === "questions" || task.planningStatus === "ready";
+}
+
+async function assessDeliverables(ctx: any, taskId: Id<"tasks">): Promise<{
+  status: "pass" | "fail";
+  summary: string;
+}> {
+  const docs = await ctx.db
+    .query("documents")
+    .withIndex("by_taskId", (q: any) => q.eq("taskId", taskId))
+    .collect();
+  const deliverables = docs.filter((doc: { type?: string }) => doc.type === "deliverable");
+
+  if (deliverables.length === 0) {
+    return { status: "fail", summary: "No deliverable document found" };
+  }
+
+  const richest = deliverables.reduce(
+    (best: { content?: string }, next: { content?: string }) => {
+      const bestLen = (best.content ?? "").trim().length;
+      const nextLen = (next.content ?? "").trim().length;
+      return nextLen > bestLen ? next : best;
+    },
+    deliverables[0]
+  );
+  const richestLen = (richest.content ?? "").trim().length;
+  if (richestLen < 40) {
+    return {
+      status: "fail",
+      summary: `Deliverable exists but content is too short (${richestLen} chars)`,
+    };
+  }
+
+  return {
+    status: "pass",
+    summary: `Found ${deliverables.length} deliverable document(s); longest has ${richestLen} chars`,
+  };
+}
+
 export const get = query({
   args: { id: v.id("tasks") },
   handler: async (ctx, args) => {
     return await ctx.db.get(args.id);
+  },
+});
+
+export const getPlanning = query({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) return null;
+    return {
+      taskId: task._id,
+      planningStatus: task.planningStatus ?? "none",
+      planningQuestions: task.planningQuestions ?? [],
+      planningDraft: task.planningDraft ?? "",
+      planningUpdatedAt: task.planningUpdatedAt ?? null,
+      planningApprovedAt: task.planningApprovedAt ?? null,
+    };
   },
 });
 
@@ -151,6 +219,12 @@ export const updateStatus = mutation({
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.id);
     if (!task) throw new Error("Task not found");
+    if (args.status === "done") {
+      const hasDeliverable = await hasTaskDeliverable(ctx, args.id);
+      if (!hasDeliverable) {
+        throw new Error('Cannot mark done without at least one "deliverable" document');
+      }
+    }
 
     const now = Date.now();
     await ctx.db.patch(args.id, {
@@ -250,7 +324,7 @@ export const stopDispatch = mutation({
       });
     }
 
-    if (task.status === "in_progress") {
+    if (task.status === "in_progress" || task.status === "testing") {
       await ctx.db.patch(task._id, {
         status: "review",
         updatedAt: now,
@@ -307,6 +381,7 @@ export const create = mutation({
       borderColor: args.borderColor,
       createdAt: now,
       updatedAt: now,
+      planningStatus: "none",
     });
 
     await ctx.db.insert("activities", {
@@ -448,6 +523,7 @@ export const enqueueDispatch = mutation({
     requestedBy: v.optional(v.string()),
     prompt: v.optional(v.string()),
     targetAgentId: v.optional(v.id("agents")),
+    idempotencyKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
@@ -455,10 +531,23 @@ export const enqueueDispatch = mutation({
     if (task.status === "archived") {
       throw new Error("Cannot dispatch an archived task");
     }
+    if (requiresPlanningApproval(task)) {
+      throw new Error("Planning must be approved before dispatch");
+    }
 
     if (args.targetAgentId) {
       const agent = await ctx.db.get(args.targetAgentId);
       if (!agent) throw new Error("Target agent not found");
+    }
+
+    const normalizedKey = args.idempotencyKey?.trim() || undefined;
+
+    if (normalizedKey) {
+      const keyed = await ctx.db
+        .query("taskDispatches")
+        .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", normalizedKey))
+        .first();
+      if (keyed) return keyed._id;
     }
 
     const existing = await ctx.db
@@ -474,6 +563,7 @@ export const enqueueDispatch = mutation({
       targetAgentId: args.targetAgentId,
       requestedBy: args.requestedBy?.trim() || "Mission Control",
       prompt: args.prompt?.trim() || undefined,
+      idempotencyKey: normalizedKey,
       status: "pending",
       requestedAt: now,
     });
@@ -498,7 +588,7 @@ export const enqueueDispatch = mutation({
     }
 
     await ctx.db.insert("activities", {
-      type: "task_updated",
+      type: "dispatch_started",
       taskId: args.taskId,
       projectId: task.projectId,
       message: `Dispatch queued for "${task.title}"`,
@@ -534,6 +624,14 @@ export const claimNextDispatch = mutation({
           status: "cancelled",
           finishedAt: now,
           error: "Task archived before dispatch",
+        });
+        continue;
+      }
+      if (requiresPlanningApproval(task)) {
+        await ctx.db.patch(next._id, {
+          status: "cancelled",
+          finishedAt: now,
+          error: "Planning not approved",
         });
         continue;
       }
@@ -627,13 +725,27 @@ export const completeDispatch = mutation({
     if (!task) throw new Error("Task not found");
 
     const now = Date.now();
-    const verificationStatus: DispatchVerificationStatus = args.verificationStatus ?? "unknown";
-    const verificationSummary = args.verificationSummary
+    let verificationStatus: DispatchVerificationStatus = args.verificationStatus ?? "unknown";
+    let verificationSummary = args.verificationSummary
       ? truncate(args.verificationSummary, 500)
       : undefined;
     const verificationCommand = args.verificationCommand
       ? truncate(args.verificationCommand, 300)
       : undefined;
+    const deterministicVerification = await assessDeliverables(ctx, task._id);
+
+    if (verificationStatus === "pass" && deterministicVerification.status === "fail") {
+      verificationStatus = "fail";
+      verificationSummary = truncate(
+        `${verificationSummary ? `${verificationSummary}. ` : ""}${deterministicVerification.summary}`,
+        500
+      );
+    } else if (verificationStatus === "unknown" || verificationStatus === "not_run") {
+      verificationStatus = deterministicVerification.status;
+      if (!verificationSummary) {
+        verificationSummary = truncate(deterministicVerification.summary, 500);
+      }
+    }
 
     await ctx.db.patch(args.dispatchId, {
       status: "completed",
@@ -646,12 +758,15 @@ export const completeDispatch = mutation({
       error: undefined,
     });
 
-    let nextTaskStatus: "in_progress" | "review" | "blocked" = "review";
-    if (task.status === "in_progress") {
-      if (verificationStatus === "fail") nextTaskStatus = "blocked";
-      else nextTaskStatus = "review";
+    let nextTaskStatus: "testing" | "review" | "blocked" = "testing";
+    if (verificationStatus === "fail") {
+      nextTaskStatus = "blocked";
+    } else if (task.status === "blocked") {
+      nextTaskStatus = "blocked";
+    } else if (task.status === "review" || task.status === "done") {
+      nextTaskStatus = "review";
     } else {
-      nextTaskStatus = task.status === "blocked" ? "blocked" : "review";
+      nextTaskStatus = "testing";
     }
 
     await ctx.db.patch(task._id, {
@@ -661,7 +776,7 @@ export const completeDispatch = mutation({
     });
 
     await ctx.db.insert("activities", {
-      type: "task_updated",
+      type: "dispatch_completed",
       taskId: task._id,
       projectId: task.projectId,
       message:
@@ -679,7 +794,7 @@ export const completeDispatch = mutation({
     if (task.status !== "archived" && verificationStatus !== "pass") {
       const reason =
         verificationStatus === "fail"
-          ? "Tests failed"
+          ? `Verification failed${verificationSummary ? `: ${truncate(verificationSummary, 120)}` : ""}`
           : verificationStatus === "not_run"
             ? "Tests were not run"
             : "Test verification missing";
@@ -687,7 +802,7 @@ export const completeDispatch = mutation({
         await ctx.db.insert("notifications", {
           targetAgentId: assigneeId,
           content: `${reason} for "${task.title}". Moved to ${
-            nextTaskStatus === "blocked" ? "blocked" : "review"
+            nextTaskStatus === "blocked" ? "blocked" : nextTaskStatus
           }.`,
           sourceTaskId: task._id,
           delivered: false,
@@ -730,7 +845,7 @@ export const failDispatch = mutation({
     }
 
     await ctx.db.insert("activities", {
-      type: "task_updated",
+      type: "dispatch_completed",
       taskId: task._id,
       projectId: task.projectId,
       message: `Dispatch failed for "${task.title}"`,
@@ -746,6 +861,215 @@ export const failDispatch = mutation({
         createdAt: now,
       });
     }
+  },
+});
+
+export const recordTestingResult = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    status: v.union(v.literal("pass"), v.literal("fail")),
+    summary: v.optional(v.string()),
+    command: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+
+    const now = Date.now();
+    const nextStatus = args.status === "pass" ? "review" : "assigned";
+    await ctx.db.patch(task._id, {
+      status: task.status === "archived" ? "archived" : nextStatus,
+      updatedAt: now,
+    });
+
+    const detailParts = [
+      args.command?.trim() ? `cmd=${truncate(args.command, 120)}` : "",
+      args.summary?.trim() ? truncate(args.summary, 200) : "",
+    ].filter(Boolean);
+
+    await ctx.db.insert("activities", {
+      type: "testing_result",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Testing ${args.status.toUpperCase()} for "${task.title}"${
+        detailParts.length > 0 ? ` (${detailParts.join(" | ")})` : ""
+      }`,
+      createdAt: now,
+    });
+
+    if (task.status !== "archived" && args.status === "fail") {
+      for (const assigneeId of task.assigneeIds) {
+        await ctx.db.insert("notifications", {
+          targetAgentId: assigneeId,
+          content: `Testing failed for "${task.title}". Task moved back to assigned.`,
+          sourceTaskId: task._id,
+          delivered: false,
+          createdAt: now,
+        });
+      }
+    }
+
+    return { ok: true, nextStatus };
+  },
+});
+
+export const markDone = mutation({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+    if (task.status === "archived") {
+      return { ok: false, reason: "task_archived" as const };
+    }
+
+    const deliverableCheck = await assessDeliverables(ctx, task._id);
+    if (deliverableCheck.status !== "pass") {
+      return {
+        ok: false,
+        reason: "deliverable_verification_failed" as const,
+        summary: deliverableCheck.summary,
+      };
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(task._id, {
+      status: "done",
+      completedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("activities", {
+      type: "task_updated",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Task "${task.title}" marked done`,
+      createdAt: now,
+    });
+    return { ok: true };
+  },
+});
+
+export const verifyDeliverablesForTask = mutation({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+
+    const now = Date.now();
+    const verification = await assessDeliverables(ctx, task._id);
+
+    if (task.status !== "archived") {
+      await ctx.db.patch(task._id, {
+        status: verification.status === "pass" ? "review" : "blocked",
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("activities", {
+      type: "testing_result",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Deliverable verification ${verification.status.toUpperCase()} for "${task.title}" (${truncate(
+        verification.summary,
+        180
+      )})`,
+      createdAt: now,
+    });
+
+    return verification;
+  },
+});
+
+export const updatePlanning = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    status: v.union(
+      v.literal("none"),
+      v.literal("questions"),
+      v.literal("ready"),
+      v.literal("approved")
+    ),
+    questions: v.optional(v.array(v.string())),
+    draft: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+    const now = Date.now();
+
+    await ctx.db.patch(task._id, {
+      planningStatus: args.status,
+      planningQuestions: args.questions?.map((q) => truncate(q, 500)),
+      planningDraft: args.draft ? truncate(args.draft, 4000) : undefined,
+      planningUpdatedAt: now,
+      planningApprovedAt: args.status === "approved" ? now : task.planningApprovedAt,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("activities", {
+      type: "planning_update",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Planning status for "${task.title}" -> ${args.status}`,
+      createdAt: now,
+    });
+  },
+});
+
+export const approvePlanning = mutation({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+    const now = Date.now();
+    await ctx.db.patch(task._id, {
+      planningStatus: "approved",
+      planningApprovedAt: now,
+      planningUpdatedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("activities", {
+      type: "planning_update",
+      taskId: task._id,
+      projectId: task.projectId,
+      message: `Planning approved for "${task.title}"`,
+      createdAt: now,
+    });
+  },
+});
+
+export const logSubagentUpdate = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    agentId: v.optional(v.id("agents")),
+    subagentName: v.string(),
+    update: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+    const now = Date.now();
+    const content = `[${args.subagentName}] ${args.update.trim()}`;
+
+    await ctx.db.insert("activities", {
+      type: "subagent_update",
+      taskId: task._id,
+      projectId: task.projectId,
+      agentId: args.agentId,
+      message: truncate(content, 500),
+      createdAt: now,
+    });
+
+    await ctx.db.insert("messages", {
+      taskId: task._id,
+      fromAgentId: args.agentId,
+      agentId: args.agentId,
+      fromUser: false,
+      content,
+      text: content,
+      channel: `task:${task._id}`,
+      mentions: [],
+      createdAt: now,
+    });
   },
 });
 
