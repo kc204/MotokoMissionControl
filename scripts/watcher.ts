@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { readFile } from "fs/promises";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import os from "os";
@@ -14,6 +15,7 @@ const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const POLL_MS = Number(process.env.WATCHER_POLL_MS || 1000);
 const MODEL_SYNC_MS = Number(process.env.WATCHER_MODEL_SYNC_MS || 60000);
+const AUTH_PROFILE_DISCOVERY_MS = Number(process.env.WATCHER_AUTH_PROFILE_DISCOVERY_MS || 15000);
 const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
 const WATCHER_LEASE_KEY = "watcher:leader";
 const WATCHER_LAST_SEEN_USER_MESSAGE_KEY = "watcher:last_seen_hq_user_message_id";
@@ -26,6 +28,9 @@ const LAST_DISPATCH_RESULT_KEY = "probe:last_dispatch_result";
 const missionControlRoot = resolveMissionControlRoot();
 const tsxCliPath = path.join(missionControlRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const orchestratorScriptPath = resolveScriptPath("orchestrator.ts");
+const OPENCLAW_AUTH_PROFILES_PATH =
+  process.env.OPENCLAW_AUTH_PROFILES_PATH ||
+  path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json");
 const watcherInstanceId = `${os.hostname()}:${process.pid}`;
 
 const client = new ConvexHttpClient(convexUrl);
@@ -35,11 +40,13 @@ let orchestratorBusy = false;
 let isLeader = false;
 let lastLeaseCheckAt = 0;
 let lastModelSyncAt = 0;
+let lastAuthProfileDiscoveryAt = 0;
 let lastSeenUserMessageId: string | null = null;
 let hasLoadedLastSeenUserMessageId = false;
 let lastManualDispatchToken: string | null = null;
 let lastAutomationRefreshAt = 0;
 let autoDispatchEnabled = true;
+let authProfileDiscoverySignature: string | null = null;
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -209,6 +216,65 @@ async function syncModels() {
   }
 }
 
+type OpenClawAuthProfileValue = {
+  provider?: string;
+  email?: string;
+};
+
+type OpenClawAuthFile = {
+  profiles?: Record<string, OpenClawAuthProfileValue>;
+};
+
+function parseProfileId(profileId: string): { provider: string; email: string } {
+  const separator = profileId.indexOf(":");
+  if (separator === -1) {
+    return { provider: "", email: profileId };
+  }
+  return {
+    provider: profileId.slice(0, separator),
+    email: profileId.slice(separator + 1),
+  };
+}
+
+async function syncAuthProfilesFromOpenClaw() {
+  try {
+    const raw = await readFile(OPENCLAW_AUTH_PROFILES_PATH, "utf8");
+    const parsed = JSON.parse(raw) as OpenClawAuthFile;
+    const entries = Object.entries(parsed.profiles ?? {});
+    if (entries.length === 0) return;
+
+    const profiles = entries
+      .map(([profileId, value]) => {
+        const parsedId = parseProfileId(profileId);
+        const provider =
+          typeof value?.provider === "string" && value.provider
+            ? value.provider
+            : parsedId.provider;
+        const email =
+          typeof value?.email === "string" && value.email
+            ? value.email
+            : parsedId.email;
+        if (!provider || !profileId) return null;
+        return { profileId, provider, email };
+      })
+      .filter((item): item is { profileId: string; provider: string; email: string } => !!item)
+      .sort((a, b) => a.profileId.localeCompare(b.profileId));
+
+    if (profiles.length === 0) return;
+
+    const signature = JSON.stringify(profiles);
+    if (signature === authProfileDiscoverySignature) return;
+
+    await client.mutation(api.auth.syncProfiles, { profiles });
+    authProfileDiscoverySignature = signature;
+    console.log(
+      `[auth] discovered ${profiles.length} OpenClaw profiles from ${OPENCLAW_AUTH_PROFILES_PATH}`
+    );
+  } catch (error) {
+    console.error("[auth] profile discovery failed:", error);
+  }
+}
+
 async function syncAuthProfile() {
   const active = await client.query(api.auth.getActive);
   if (!active) return;
@@ -225,10 +291,9 @@ async function syncAuthProfile() {
   if (syncKey === activeAuthProfile) return;
 
   const agents = await client.query(api.agents.list);
-  let successCount = 0;
-  for (const agent of agents) {
-    const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
-    try {
+  const results = await Promise.allSettled(
+    agents.map(async (agent) => {
+      const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
       await runOpenClaw([
         "models",
         "auth",
@@ -240,10 +305,19 @@ async function syncAuthProfile() {
         openclawAgentId,
         active.profileId,
       ]);
+      return agent.name;
+    })
+  );
+
+  let successCount = 0;
+  for (let i = 0; i < results.length; i += 1) {
+    const result = results[i];
+    if (result.status === "fulfilled") {
       successCount += 1;
-    } catch (error) {
-      console.error(`[auth] failed for ${agent.name}:`, error);
+      continue;
     }
+    const agentName = agents[i]?.name ?? "unknown";
+    console.error(`[auth] failed for ${agentName}:`, result.reason);
   }
 
   if (successCount > 0) {
@@ -361,6 +435,13 @@ async function tick() {
   const now = Date.now();
   await refreshAutomationConfig(now);
   const leader = await ensureLeadership(now);
+  const syncNow = Date.now();
+  if (syncNow - lastAuthProfileDiscoveryAt >= AUTH_PROFILE_DISCOVERY_MS) {
+    await syncAuthProfilesFromOpenClaw();
+    lastAuthProfileDiscoveryAt = syncNow;
+  }
+  await syncAuthProfile();
+
   if (!leader) return;
 
   if (autoDispatchEnabled) {
@@ -368,13 +449,10 @@ async function tick() {
   }
   await checkManualDispatchRequest();
 
-  const syncNow = Date.now();
   if (syncNow - lastModelSyncAt >= MODEL_SYNC_MS) {
     await syncModels();
     lastModelSyncAt = syncNow;
   }
-
-  await syncAuthProfile();
 }
 
 async function main() {
