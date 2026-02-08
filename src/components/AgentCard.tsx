@@ -39,9 +39,11 @@ export default function AgentCard({
   const availableModels = useQuery(api.models.list) || [];
   const updateModel = useMutation(api.agents.updateModel);
   const [isEditing, setIsEditing] = useState(false);
+  const normalizedThinkingModel =
+    models.thinking === "codex-cli" ? "anthropic/codex-cli" : models.thinking;
 
   const currentModelName =
-    availableModels.find((m) => m.id === models.thinking)?.name || models.thinking;
+    availableModels.find((m) => m.id === normalizedThinkingModel)?.name || models.thinking;
 
   const handleModelChange = async (newModelId: string) => {
     await updateModel({ id, modelType: "thinking", modelName: newModelId });
@@ -81,7 +83,7 @@ export default function AgentCard({
           </div>
           {isEditing ? (
             <select
-              value={models.thinking}
+              value={normalizedThinkingModel}
               onChange={(e) => handleModelChange(e.target.value)}
               className="w-full rounded-lg border border-white/15 bg-black/40 px-2 py-2 text-sm text-zinc-200 focus:border-cyan-400/40 focus:outline-none"
             >

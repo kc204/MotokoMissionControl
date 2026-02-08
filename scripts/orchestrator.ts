@@ -3,7 +3,12 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
-import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
+import {
+  buildTsxCommand,
+  loadMissionControlEnv,
+  normalizeModelId,
+  parseOpenClawJsonOutput,
+} from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -19,6 +24,8 @@ const LAST_REPORT_CHAT_KEY = "probe:last_report_chat_write";
 const reportScriptPath = buildTsxCommand("report.ts");
 
 const client = new ConvexHttpClient(convexUrl);
+const runtimeModelCache = new Map<string, string>();
+const runtimeAuthCache = new Map<string, string>();
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -113,22 +120,30 @@ async function getActiveAuthProfile() {
 }
 
 async function ensureAgentRuntimeConfig(agentRuntimeId: string, thinkingModel: string) {
+  const normalizedModel = normalizeModelId(thinkingModel);
   const activeAuth = await getActiveAuthProfile();
   if (activeAuth) {
-    await runOpenClawAgentCommand([
-      "models",
-      "auth",
-      "order",
-      "set",
-      "--provider",
-      activeAuth.provider,
-      "--agent",
-      agentRuntimeId,
-      activeAuth.profileId,
-    ]);
+    const authKey = `${activeAuth.provider}:${activeAuth.profileId}`;
+    if (runtimeAuthCache.get(agentRuntimeId) !== authKey) {
+      await runOpenClawAgentCommand([
+        "models",
+        "auth",
+        "order",
+        "set",
+        "--provider",
+        activeAuth.provider,
+        "--agent",
+        agentRuntimeId,
+        activeAuth.profileId,
+      ]);
+      runtimeAuthCache.set(agentRuntimeId, authKey);
+    }
   }
 
-  await runOpenClawAgentCommand(["models", "--agent", agentRuntimeId, "set", thinkingModel]);
+  if (normalizedModel && runtimeModelCache.get(agentRuntimeId) !== normalizedModel) {
+    await runOpenClawAgentCommand(["models", "--agent", agentRuntimeId, "set", normalizedModel]);
+    runtimeModelCache.set(agentRuntimeId, normalizedModel);
+  }
 }
 
 async function runOpenClawAgentCommand(args: string[]): Promise<void> {
@@ -165,7 +180,7 @@ async function runOpenClawAgent(agentId: string, prompt: string): Promise<OpenCl
     child.on("close", (code) => {
       if (code === 0) {
         try {
-          const parsed = JSON.parse(stdout);
+          const parsed = parseOpenClawJsonOutput<unknown>(stdout);
           resolve({ assistantText: extractAssistantText(parsed) });
           return;
         } catch {

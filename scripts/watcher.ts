@@ -5,7 +5,13 @@ import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
 import path from "path";
-import { loadMissionControlEnv, resolveMissionControlRoot, resolveScriptPath } from "./lib/mission-control";
+import {
+  loadMissionControlEnv,
+  normalizeModelId,
+  parseOpenClawJsonOutput,
+  resolveMissionControlRoot,
+  resolveScriptPath,
+} from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -95,7 +101,7 @@ async function runOpenClawJson<T>(args: string[]): Promise<T> {
         return;
       }
       try {
-        resolve(JSON.parse(stdout) as T);
+        resolve(parseOpenClawJsonOutput<T>(stdout));
       } catch {
         reject(new Error(`Failed to parse JSON from openclaw: ${stdout || stderr}`));
       }
@@ -189,7 +195,8 @@ async function syncModels() {
   const agents = await client.query(api.agents.list);
   for (const agent of agents) {
     const key = agent.sessionKey;
-    const desired = agent.models.thinking;
+    const desired = normalizeModelId(agent.models.thinking);
+    if (!desired) continue;
     const lastKnown = modelCache.get(key);
     if (lastKnown === desired) continue;
 
@@ -473,6 +480,7 @@ async function processTaskDispatchQueue() {
   if (!dispatch) return;
 
   const runtimeAgentId = agentIdFromSessionKey(dispatch.targetSessionKey);
+  const targetThinkingModel = normalizeModelId(dispatch.targetThinkingModel);
   const sessionId = `mission-${dispatch.taskId}`;
   const prompt = buildTaskDispatchPrompt(dispatch);
   const startedAt = Date.now();
@@ -484,9 +492,11 @@ async function processTaskDispatchQueue() {
     const activeAuthProfile = await getActiveAuthProfile();
     await ensureAgentAuthOrder(runtimeAgentId, activeAuthProfile);
 
-    // Enforce the selected model immediately for this agent before dispatch.
-    await runOpenClaw(["models", "--agent", runtimeAgentId, "set", dispatch.targetThinkingModel]);
-    modelCache.set(dispatch.targetSessionKey, dispatch.targetThinkingModel);
+    // Enforce the selected model when changed to avoid unnecessary config churn.
+    if (targetThinkingModel && modelCache.get(dispatch.targetSessionKey) !== targetThinkingModel) {
+      await runOpenClaw(["models", "--agent", runtimeAgentId, "set", targetThinkingModel]);
+      modelCache.set(dispatch.targetSessionKey, targetThinkingModel);
+    }
 
     const result = await runOpenClawJson<unknown>([
       "agent",

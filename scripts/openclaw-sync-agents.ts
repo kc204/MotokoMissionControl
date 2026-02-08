@@ -4,6 +4,7 @@ import * as dotenv from "dotenv";
 import path from "path";
 import os from "os";
 import { api } from "../convex/_generated/api";
+import { normalizeModelId, parseOpenClawJsonOutput } from "./lib/mission-control";
 
 dotenv.config({ path: ".env.local" });
 
@@ -32,8 +33,8 @@ function spawnOpenClaw(args: string[]) {
   });
 }
 
-async function runOpenClawJson(args: string[]): Promise<any> {
-  return await new Promise((resolve, reject) => {
+async function runOpenClawJson<T>(args: string[]): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
     const child = spawnOpenClaw(args);
     let stdout = "";
     let stderr = "";
@@ -50,7 +51,7 @@ async function runOpenClawJson(args: string[]): Promise<any> {
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        resolve(parseOpenClawJsonOutput<T>(stdout));
       } catch {
         reject(new Error(`Failed to parse JSON output for openclaw args=${args.join(" ")}`));
       }
@@ -75,7 +76,7 @@ async function main() {
 
     const workspace =
       agentId === "main" ? WORKSPACE_ROOT : path.join(WORKSPACE_ROOT, agentId);
-    const model = agent.models.thinking;
+    const model = normalizeModelId(agent.models.thinking) || agent.models.thinking;
     const args = [
       "agents",
       "add",
@@ -89,7 +90,7 @@ async function main() {
     ];
 
     try {
-      const result = await runOpenClawJson(args);
+      const result = await runOpenClawJson<{ id?: string }>(args);
       console.log(`[added] ${agentId} workspace=${workspace}`);
       if (result?.id) {
         existingIds.add(result.id);

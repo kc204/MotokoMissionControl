@@ -11,6 +11,13 @@ function inferLevelFromRole(role: string) {
   return "INT" as const;
 }
 
+function normalizeModelName(modelName?: string) {
+  if (!modelName) return modelName;
+  const trimmed = modelName.trim();
+  if (trimmed === "codex-cli") return "anthropic/codex-cli";
+  return trimmed;
+}
+
 function slugifyAgentId(input: string) {
   const base = input
     .trim()
@@ -112,10 +119,16 @@ export const createAgent = mutation({
       character: args.character,
       lore: args.lore,
       models: {
-        thinking: args.thinkingModel ?? "google-antigravity/claude-opus-4-5-thinking",
-        execution: args.executionModel,
-        heartbeat: args.heartbeatModel ?? "google/gemini-2.5-flash",
-        fallback: args.fallbackModel ?? "google-antigravity/claude-sonnet-4-5",
+        thinking:
+          normalizeModelName(args.thinkingModel) ??
+          "google-antigravity/claude-opus-4-5-thinking",
+        execution: normalizeModelName(args.executionModel),
+        heartbeat:
+          normalizeModelName(args.heartbeatModel) ??
+          "google/gemini-2.5-flash",
+        fallback:
+          normalizeModelName(args.fallbackModel) ??
+          "google-antigravity/claude-sonnet-4-5",
       },
       createdAt: now,
       updatedAt: now,
@@ -293,7 +306,10 @@ export const updateModel = mutation({
     const agent = await ctx.db.get(args.id);
     if (!agent) throw new Error("Agent not found");
 
-    const models = { ...agent.models, [args.modelType]: args.modelName };
+    const models = {
+      ...agent.models,
+      [args.modelType]: normalizeModelName(args.modelName) ?? args.modelName,
+    };
     await ctx.db.patch(args.id, { models, updatedAt: Date.now() });
   },
 });

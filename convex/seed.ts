@@ -22,7 +22,7 @@ const canonicalAgents = [
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Forge",
     models: {
       thinking: "google-antigravity/claude-opus-4-5-thinking",
-      execution: "codex-cli",
+      execution: "anthropic/codex-cli",
       heartbeat: "google/gemini-2.5-flash",
       fallback: "google-antigravity/claude-sonnet-4-5",
     },

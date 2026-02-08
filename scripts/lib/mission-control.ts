@@ -33,3 +33,31 @@ export function buildTsxCommand(scriptFileName: string, args: string[] = []) {
   const argText = args.map((arg) => quoteArg(arg)).join(" ");
   return `npx tsx ${quoteArg(scriptPath)}${argText ? ` ${argText}` : ""}`;
 }
+
+export function normalizeModelId(modelId?: string | null) {
+  if (!modelId) return "";
+  const trimmed = modelId.trim();
+  if (!trimmed) return "";
+  if (trimmed === "codex-cli") return "anthropic/codex-cli";
+  return trimmed;
+}
+
+export function parseOpenClawJsonOutput<T>(stdout: string): T {
+  const raw = stdout.trim();
+  if (!raw) {
+    throw new Error("Empty JSON output");
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const objectStart = raw.indexOf("{");
+    const arrayStart = raw.indexOf("[");
+    const candidates = [objectStart, arrayStart].filter((index) => index >= 0);
+    if (candidates.length === 0) {
+      throw new Error("No JSON payload found in output");
+    }
+    const start = Math.min(...candidates);
+    return JSON.parse(raw.slice(start)) as T;
+  }
+}
