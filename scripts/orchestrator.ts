@@ -5,12 +5,10 @@
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import { exec } from "child_process";
-import { promisify } from "util";
 import { loadMissionControlEnv, buildTsxCommand } from "./lib/mission-control";
 
 loadMissionControlEnv();
 
-const execAsync = promisify(exec);
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) {
     throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
@@ -62,6 +60,7 @@ async function checkChat() {
   for (const agent of targets) {
     // Use buildTsxCommand for reliable absolute paths
     const reportCmd = buildTsxCommand("report.ts", ["chat", agent, "YOUR_RESPONSE_HERE"]);
+    const listCmd = buildTsxCommand("report.ts", ["list-messages", "hq"]);
     
     // We need to escape quotes carefully for the prompt
     // The prompt is passed to --task "..."
@@ -79,7 +78,7 @@ async function checkChat() {
        ${reportCmd}
     
     3. If you need to see previous messages, run:
-       npx tsx "${workDir}/scripts/report.ts" list-messages hq
+       ${listCmd}
     
     DO NOT try to "browse" the channel. Use the CLI commands provided.`;
 

@@ -1,159 +1,231 @@
-// scripts/watcher.ts
-// Syncs Mission Control (Convex) state to OpenClaw Runtime (Config/Auth)
-
 import { exec } from "child_process";
 import { promisify } from "util";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import * as dotenv from "dotenv";
+import { loadMissionControlEnv } from "./lib/mission-control";
+import * as fs from "fs/promises";
+import * as os from "os";
 import * as path from "path";
-import { fileURLToPath } from "url";
 
-// Env setup
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, "../.env.local") });
+loadMissionControlEnv();
 
-if (!process.env.NEXT_PUBLIC_CONVEX_URL) {
-  console.error("❌ Missing NEXT_PUBLIC_CONVEX_URL");
+const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+if (!convexUrl) {
+  console.error("Missing NEXT_PUBLIC_CONVEX_URL");
   process.exit(1);
 }
 
-const client = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+const client = new ConvexHttpClient(convexUrl);
 const execAsync = promisify(exec);
 
-console.log("👁️ Watcher Active: Syncing Mission Control <-> OpenClaw");
+const POLL_MS = Number(process.env.WATCHER_POLL_MS || 3000);
+const MODELS_SYNC_MS = Number(process.env.WATCHER_MODELS_SYNC_MS || 15000);
+const AUTH_SYNC_MS = Number(process.env.WATCHER_AUTH_SYNC_MS || 15000);
+const RETRY_BASE_MS = Number(process.env.WATCHER_RETRY_BASE_MS || 60000);
+const RETRY_MAX_MS = Number(process.env.WATCHER_RETRY_MAX_MS || 600000);
+const HISTORY_TTL_MS = Number(process.env.WATCHER_HISTORY_TTL_MS || 3600000);
 
-// State cache to avoid redundant updates
-const state = {
-  models: {} as Record<string, string>, // agentName -> modelId
-  authProfile: null as string | null,   // profileId
-  lastMsgId: null as string | null,
-};
-
-// Mapping Mission Control Names -> OpenClaw IDs
 const AGENT_ID_MAP: Record<string, string> = {
-  "Motoko": "main",
-  "Recon": "researcher",
-  "Quill": "writer",
-  "Forge": "developer",
-  "Pulse": "monitor"
+  Motoko: "main",
+  Recon: "researcher",
+  Quill: "writer",
+  Forge: "developer",
+  Pulse: "monitor",
 };
 
-// Main Loop
-setInterval(async () => {
-  try {
-    await syncModels();
-    await syncAuth();
-    await checkChat();
-  } catch (e) {
-    console.error("Watcher Loop Error:", e);
-  }
-}, 2000);
+const state = {
+  models: new Map<string, string>(),
+  authProfile: null as string | null,
+  lastSeenMessageId: null as string | null,
+  inFlightMessageId: null as string | null,
+  processedAt: new Map<string, number>(),
+  failureCount: new Map<string, number>(),
+  retryAt: new Map<string, number>(),
+  lastModelsSyncAt: 0,
+  lastAuthSyncAt: 0,
+};
 
-async function syncModels() {
-  const agents = await client.query(api.agents.list);
-  
-  for (const agent of agents) {
-    const desiredModel = agent.models.thinking;
-    const lastKnown = state.models[agent.name];
-    const openclawId = AGENT_ID_MAP[agent.name];
-
-    if (!openclawId) continue; // Unknown agent
-
-    // Detect change
-    if (lastKnown && lastKnown !== desiredModel) {
-      console.log(`🔄 Syncing Model: ${agent.name} (${openclawId}) -> ${desiredModel}`);
-      
-      try {
-        // We need to find the array index for 'openclaw config set agents.list[X].model'
-        // Or simpler: use 'openclaw agents update' if available, but config set is safer.
-        
-        // Strategy: We can't easily find the index via CLI json without parsing.
-        // BUT, we can try to just set it using the agent's override if supported, 
-        // OR just parse the config.
-        
-        // Let's use a helper to find index
-        const index = await findAgentIndex(openclawId);
-        if (index !== -1) {
-            // Apply config change
-            const cmd = `openclaw config set agents.list[${index}].model "${desiredModel}"`;
-            await execAsync(cmd);
-            console.log(`✅ Config updated: ${cmd}`);
-            
-            // Also attempt runtime update if possible (not always persistent)
-            // await execAsync(`openclaw agents restart ${openclawId}`); // restart logic?
-        } else {
-            console.warn(`⚠️ Could not find agent ${openclawId} in config list.`);
-        }
-
-      } catch (err) {
-        console.error(`❌ Failed to sync model for ${agent.name}:`, err);
-      }
-    }
-    state.models[agent.name] = desiredModel;
-  }
+function normalizeModelName(modelName?: string) {
+  if (!modelName) return "";
+  const trimmed = modelName.trim();
+  if (trimmed === "anthropic/codex-cli") return "codex-cli";
+  return trimmed;
 }
 
-async function syncAuth() {
-  const activeProfile = await client.query(api.auth.getActive);
-  if (!activeProfile) return;
-
-  if (state.authProfile && state.authProfile !== activeProfile.profileId) {
-    console.log(`🔐 Switching Auth -> ${activeProfile.profileId}`);
-    try {
-      await execAsync(`openclaw auth switch "${activeProfile.profileId}"`);
-      console.log("✅ Auth switched successfully.");
-    } catch (err) {
-      console.error("❌ Auth switch failed:", err);
-    }
+function isAvailableModel(modelId: string, catalog: Set<string>) {
+  if (!modelId || catalog.size === 0) return true;
+  if (catalog.has(modelId)) return true;
+  for (const id of catalog) {
+    if (id.endsWith(`/${modelId}`)) return true;
   }
-  state.authProfile = activeProfile.profileId;
+  return false;
 }
 
-async function checkChat() {
-  const messages = await client.query(api.messages.list, { channel: "hq" });
-  if (messages.length === 0) return;
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  const newest = messages[messages.length - 1]; // API returns reversed (oldest first)? 
-  // Let's rely on my previous fix: messages list returns newest-first?
-  // Wait, previous investigation said list() usually does order("desc"), so [0] is newest.
-  // But then I saw code doing .reverse().map().
-  
-  // Let's assume [messages.length-1] is newest based on previous fix attempt.
-  // Actually, let's stick to checking `_id` change.
-  
-  if (!newest.agentId && newest._id !== state.lastMsgId) {
-    console.log("📨 New User Message detected!");
-    state.lastMsgId = newest._id;
-    // Trigger Orchestrator
-    exec(`npx tsx scripts/orchestrator.ts`, (err, stdout) => {
-        if (stdout) console.log(stdout);
-        if (err) console.error("Orchestrator error:", err);
-    });
-  } else if (newest._id !== state.lastMsgId) {
-     state.lastMsgId = newest._id;
+function pruneHistory(now: number) {
+  for (const [messageId, at] of state.processedAt) {
+    if (now - at > HISTORY_TTL_MS) {
+      state.processedAt.delete(messageId);
+      state.failureCount.delete(messageId);
+      state.retryAt.delete(messageId);
+    }
   }
 }
 
 async function findAgentIndex(agentId: string): Promise<number> {
-    // Hacky way to find index: read config via CLI
-    try {
-        const { stdout } = await execAsync("openclaw config get agents.list");
-        // Output is YAML or JSON? usually simplified JSON-like.
-        // It's risky to parse text.
-        // Better way: Read file directly since we are local.
-        
-        const fs = await import("fs/promises");
-        const homedir = (await import("os")).homedir();
-        const configPath = path.join(homedir, ".openclaw", "openclaw.json");
-        const content = await fs.readFile(configPath, "utf-8");
-        const json = JSON.parse(content);
-        
-        const list = json.agents?.list || [];
-        return list.findIndex((a: any) => a.id === agentId);
-    } catch (e) {
-        console.error("Config read error:", e);
-        return -1;
-    }
+  try {
+    const configPath = path.join(os.homedir(), ".openclaw", "openclaw.json");
+    const content = await fs.readFile(configPath, "utf-8");
+    const json = JSON.parse(content);
+    const list = Array.isArray(json?.agents?.list) ? json.agents.list : [];
+    return list.findIndex((entry: { id?: unknown }) => entry?.id === agentId);
+  } catch {
+    return -1;
+  }
 }
+
+async function syncModels(now: number) {
+  if (now - state.lastModelsSyncAt < MODELS_SYNC_MS) return;
+  state.lastModelsSyncAt = now;
+
+  const [agents, availableModels] = await Promise.all([
+    client.query(api.agents.list),
+    client.query(api.models.list).catch(() => [] as Array<{ id: string; name: string }>),
+  ]);
+  const catalog = new Set(availableModels.map((m) => normalizeModelName(m.id)));
+
+  for (const agent of agents) {
+    const openclawId = AGENT_ID_MAP[agent.name];
+    if (!openclawId) continue;
+
+    const desiredRaw = agent.models?.thinking || "";
+    const desiredModel = normalizeModelName(desiredRaw);
+    const previous = state.models.get(agent.name);
+
+    if (!previous) {
+      state.models.set(agent.name, desiredModel);
+      continue;
+    }
+    if (previous === desiredModel) continue;
+
+    if (!isAvailableModel(desiredModel, catalog)) {
+      console.warn(
+        `[model-preflight] ${agent.name} (${openclawId}) unavailable model(s): thinking=${desiredModel}`
+      );
+      state.models.set(agent.name, desiredModel);
+      continue;
+    }
+
+    const index = await findAgentIndex(openclawId);
+    if (index < 0) {
+      console.warn(`[model-sync] could not find OpenClaw agent id "${openclawId}" in config`);
+      state.models.set(agent.name, desiredModel);
+      continue;
+    }
+
+    try {
+      await execAsync(`openclaw config set agents.list[${index}].model "${desiredModel}"`);
+      console.log(`[model-sync] ${agent.name} (${openclawId}) -> ${desiredModel}`);
+    } catch (error) {
+      console.error(`[model-sync] failed for ${agent.name}:`, error);
+    } finally {
+      state.models.set(agent.name, desiredModel);
+    }
+  }
+}
+
+async function syncAuth(now: number) {
+  if (now - state.lastAuthSyncAt < AUTH_SYNC_MS) return;
+  state.lastAuthSyncAt = now;
+
+  const activeProfile = await client.query(api.auth.getActive).catch(() => null);
+  if (!activeProfile?.profileId) return;
+  if (!state.authProfile) {
+    state.authProfile = activeProfile.profileId;
+    return;
+  }
+  if (state.authProfile === activeProfile.profileId) return;
+
+  try {
+    await execAsync(`openclaw auth switch "${activeProfile.profileId}"`);
+    console.log(`[auth-sync] switched active profile -> ${activeProfile.profileId}`);
+    state.authProfile = activeProfile.profileId;
+  } catch (error) {
+    console.error("[auth-sync] switch failed:", error);
+  }
+}
+
+async function runOrchestrator(messageId: string) {
+  state.inFlightMessageId = messageId;
+  state.lastSeenMessageId = messageId;
+  try {
+    const { stdout, stderr } = await execAsync("npx tsx scripts/orchestrator.ts");
+    if (stdout.trim()) console.log(stdout.trim());
+    if (stderr.trim()) console.warn(stderr.trim());
+    state.processedAt.set(messageId, Date.now());
+    state.failureCount.delete(messageId);
+    state.retryAt.delete(messageId);
+  } catch (error) {
+    const failures = (state.failureCount.get(messageId) ?? 0) + 1;
+    const delay = Math.min(RETRY_BASE_MS * failures, RETRY_MAX_MS);
+    state.failureCount.set(messageId, failures);
+    state.retryAt.set(messageId, Date.now() + delay);
+    console.error(`[dispatch] orchestrator failed for ${messageId}; retry in ${delay}ms`, error);
+  } finally {
+    state.inFlightMessageId = null;
+  }
+}
+
+async function checkChat(now: number) {
+  if (state.inFlightMessageId) return;
+
+  const messages = await client.query(api.messages.list, { channel: "hq" });
+  if (messages.length === 0) return;
+
+  const newest = messages[messages.length - 1];
+  if (!newest?._id) return;
+
+  // Agent-originated messages do not trigger orchestration.
+  if (newest.agentId) {
+    state.lastSeenMessageId = newest._id;
+    return;
+  }
+
+  const messageId = newest._id as string;
+  const retryAt = state.retryAt.get(messageId) ?? 0;
+  if (retryAt > now) return;
+  if (state.processedAt.has(messageId)) return;
+
+  // Only launch when we observe a new user message.
+  if (state.lastSeenMessageId && state.lastSeenMessageId !== messageId) {
+    console.log(`[dispatch] new HQ user message ${messageId}`);
+  } else if (state.lastSeenMessageId === messageId && !state.failureCount.has(messageId)) {
+    return;
+  }
+
+  await runOrchestrator(messageId);
+}
+
+async function main() {
+  console.log(`Watcher active. poll=${POLL_MS}ms`);
+  while (true) {
+    const now = Date.now();
+    try {
+      await syncModels(now);
+      await syncAuth(now);
+      await checkChat(now);
+      pruneHistory(now);
+    } catch (error) {
+      console.error("[watcher] loop error:", error);
+    }
+    await sleep(POLL_MS);
+  }
+}
+
+main().catch((error) => {
+  console.error("Watcher fatal:", error);
+  process.exit(1);
+});

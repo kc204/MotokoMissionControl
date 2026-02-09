@@ -8,7 +8,7 @@ import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
 loadMissionControlEnv();
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
-if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .-env.local");
+if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
 
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
@@ -23,8 +23,8 @@ function spawnAsync(command: string, args: string[], options: import('child_proc
     const child = spawn(cmd, cmdArgs, { stdio: 'pipe', ...options });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (data) => (stdout += data.toString()));
-    child.stderr.on('data', (data) => (stderr += data.toString()));
+    child.stdout?.on('data', (data) => (stdout += data.toString()));
+    child.stderr?.on('data', (data) => (stderr += data.toString()));
     child.on('error', reject);
     child.on('close', (code) => resolve({ stdout, stderr, code }));
   });

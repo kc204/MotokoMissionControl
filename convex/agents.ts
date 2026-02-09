@@ -44,7 +44,7 @@ function isModelIdInCatalog(modelId: string, catalog: Set<string>) {
   return false;
 }
 
-async function assertModelAvailable(ctx: MutationCtx, modelId: string) {
+async function assertModelAvailable(ctx: { db: MutationCtx["db"] }, modelId: string) {
   const normalized = normalizeModelName(modelId) ?? modelId;
   const row = await ctx.db
     .query("settings")
