@@ -16,6 +16,8 @@ type AutomationForm = {
   heartbeatRequireChatUpdate: boolean;
 };
 
+type WiringState = "live" | "partial" | "not_wired";
+
 const DEFAULT_FORM: AutomationForm = {
   autoDispatchEnabled: true,
   notificationDeliveryEnabled: true,
@@ -26,6 +28,52 @@ const DEFAULT_FORM: AutomationForm = {
   heartbeatMaxActivities: 4,
   heartbeatRequireChatUpdate: false,
 };
+
+function WiringBadge({ state }: { state: WiringState }) {
+  const meta =
+    state === "live"
+      ? {
+          label: "Live",
+          className:
+            "border-emerald-400/40 bg-emerald-500/10 text-emerald-200",
+        }
+      : state === "partial"
+      ? {
+          label: "Partial",
+          className: "border-amber-400/40 bg-amber-500/10 text-amber-200",
+        }
+      : {
+          label: "Not wired",
+          className: "border-rose-400/40 bg-rose-500/10 text-rose-200",
+        };
+
+  return (
+    <span
+      title={
+        state === "live"
+          ? "This control is actively consumed by runtime scripts."
+          : state === "partial"
+          ? "This control influences behavior, but is not strictly enforced end-to-end."
+          : "This value is saved but not currently consumed by runtime automation."
+      }
+      className={`ml-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${meta.className}`}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function WiringHint({ text }: { text: string }) {
+  return (
+    <span
+      title={text}
+      className="ml-2 inline-flex h-4 w-4 items-center justify-center rounded-full border border-white/20 bg-white/[0.06] text-[10px] font-bold text-zinc-300"
+      aria-label={text}
+    >
+      i
+    </span>
+  );
+}
 
 function clamp(value: number, min: number, max: number) {
   if (!Number.isFinite(value)) return min;
@@ -114,7 +162,11 @@ export default function SettingsPage() {
       <section className="max-w-3xl rounded-2xl border border-white/10 bg-black/35 p-5">
         <div className="grid gap-4 md:grid-cols-2">
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <span className="text-sm text-zinc-200">Auto Dispatch</span>
+            <span className="text-sm text-zinc-200">
+              Auto Dispatch
+              <WiringBadge state="not_wired" />
+              <WiringHint text="Saved in automation config, but no watcher/orchestrator path currently checks this flag." />
+            </span>
             <input
               type="checkbox"
               checked={form.autoDispatchEnabled}
@@ -126,7 +178,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <span className="text-sm text-zinc-200">Notification Delivery</span>
+            <span className="text-sm text-zinc-200">
+              Notification Delivery
+              <WiringBadge state="live" />
+              <WiringHint text="poll-notifications reads this flag and skips delivery when disabled." />
+            </span>
             <input
               type="checkbox"
               checked={form.notificationDeliveryEnabled}
@@ -138,7 +194,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <p className="mb-2 text-sm text-zinc-200">Notification Batch Size</p>
+            <p className="mb-2 text-sm text-zinc-200">
+              Notification Batch Size
+              <WiringBadge state="live" />
+              <WiringHint text="poll-notifications uses this as the limit for each undelivered notification batch." />
+            </p>
             <input
               type="number"
               min={1}
@@ -153,7 +213,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <span className="text-sm text-zinc-200">Heartbeat Enabled</span>
+            <span className="text-sm text-zinc-200">
+              Heartbeat Enabled
+              <WiringBadge state="live" />
+              <WiringHint text="heartbeat-orchestrator exits early when this is off." />
+            </span>
             <input
               type="checkbox"
               checked={form.heartbeatEnabled}
@@ -165,7 +229,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <p className="mb-2 text-sm text-zinc-200">Heartbeat Max Notifications</p>
+            <p className="mb-2 text-sm text-zinc-200">
+              Heartbeat Max Notifications
+              <WiringBadge state="partial" />
+              <WiringHint text="Read by heartbeat prompt assembly, but current prompt mostly reflects counts rather than strict per-item truncation." />
+            </p>
             <input
               type="number"
               min={1}
@@ -180,7 +248,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <p className="mb-2 text-sm text-zinc-200">Heartbeat Max Tasks</p>
+            <p className="mb-2 text-sm text-zinc-200">
+              Heartbeat Max Tasks
+              <WiringBadge state="partial" />
+              <WiringHint text="Read by heartbeat prompt assembly, but current prompt mostly reflects counts rather than strict per-item truncation." />
+            </p>
             <input
               type="number"
               min={1}
@@ -195,7 +267,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <p className="mb-2 text-sm text-zinc-200">Heartbeat Max Activity Items</p>
+            <p className="mb-2 text-sm text-zinc-200">
+              Heartbeat Max Activity Items
+              <WiringBadge state="live" />
+              <WiringHint text="Used directly as the query limit for recent activity in heartbeat-orchestrator." />
+            </p>
             <input
               type="number"
               min={1}
@@ -210,7 +286,11 @@ export default function SettingsPage() {
           </label>
 
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
-            <span className="text-sm text-zinc-200">Heartbeat Requires Chat Update</span>
+            <span className="text-sm text-zinc-200">
+              Heartbeat Requires Chat Update
+              <WiringBadge state="partial" />
+              <WiringHint text="Changes heartbeat prompt instructions, but enforcement depends on agent compliance rather than a hard gate." />
+            </span>
             <input
               type="checkbox"
               checked={form.heartbeatRequireChatUpdate}
