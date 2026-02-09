@@ -150,8 +150,14 @@ async function syncAuth(now: number) {
   if (state.authProfile === activeProfile.profileId) return;
 
   try {
-    await execAsync(`openclaw auth switch "${activeProfile.profileId}"`);
-    console.log(`[auth-sync] switched active profile -> ${activeProfile.profileId}`);
+    const provider = activeProfile.profileId.split(":")[0];
+    if (!provider) {
+      throw new Error(`Invalid profile id format: ${activeProfile.profileId}`);
+    }
+    await execAsync(
+      `openclaw models auth order set --provider "${provider}" "${activeProfile.profileId}"`
+    );
+    console.log(`[auth-sync] set auth profile -> ${activeProfile.profileId}`);
     state.authProfile = activeProfile.profileId;
   } catch (error) {
     console.error("[auth-sync] switch failed:", error);
