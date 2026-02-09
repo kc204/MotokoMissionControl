@@ -88,7 +88,7 @@ async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> 
   await new Promise<void>((resolve, reject) => {
     // On Windows, execute the full command string via cmd.exe to handle paths with spaces.
     const child = IS_WINDOWS
-      ? spawn("cmd.exe", ["/d", "/s", "/c", command], { stdio: "inherit" })
+      ? spawn(command, { stdio: "inherit", shell: true })
       : spawn(command, { stdio: "inherit", shell: true });
     
     child.on("error", (error) => reject(error));

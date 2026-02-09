@@ -25,6 +25,36 @@ const AGENT_MAP: Record<string, string> = {
   "Pulse": "monitor"
 };
 
+const AGENT_MENTION_MAP: Record<string, string> = {
+  motoko: "Motoko",
+  main: "Motoko",
+  recon: "Recon",
+  researcher: "Recon",
+  quill: "Quill",
+  writer: "Quill",
+  forge: "Forge",
+  developer: "Forge",
+  pulse: "Pulse",
+  monitor: "Pulse",
+};
+
+function resolveMentionTargets(messageText: string): Set<string> {
+  const targets = new Set<string>();
+  const mentions = messageText.match(/@([a-zA-Z0-9_]+)/g) ?? [];
+
+  for (const mention of mentions) {
+    const tag = mention.slice(1).toLowerCase();
+    if (tag === "all" || tag === "everyone" || tag === "team") {
+      for (const agentName of Object.keys(AGENT_MAP)) targets.add(agentName);
+      continue;
+    }
+    const mapped = AGENT_MENTION_MAP[tag];
+    if (mapped) targets.add(mapped);
+  }
+
+  return targets;
+}
+
 async function main() {
   console.log("🎮 Orchestrator: Checking for work...");
   await checkChat();
@@ -39,21 +69,13 @@ async function checkChat() {
   // If the last message is from an agent, we're done (they replied).
   if (newestMsg.agentId) return; 
 
-  // Routing logic...
-  const text = newestMsg.text.toLowerCase();
-  const targets = new Set<string>();
-
-  if (text.includes("@motoko") || text.includes("motoko")) targets.add("Motoko");
-  if (text.includes("@recon") || text.includes("research")) targets.add("Recon");
-  if (text.includes("@quill") || text.includes("write")) targets.add("Quill");
-  if (text.includes("@forge") || text.includes("code")) targets.add("Forge");
-  if (text.includes("@pulse") || text.includes("monitor")) targets.add("Pulse");
-  
-  if (text.includes("team") || text.includes("everyone") || text.includes("all agents")) {
-    targets.add("Motoko"); targets.add("Recon"); targets.add("Quill"); targets.add("Forge"); targets.add("Pulse");
+  // Strict routing: only explicit @mentions trigger agent dispatch.
+  const messageText = newestMsg.text ?? "";
+  const targets = resolveMentionTargets(messageText);
+  if (targets.size === 0) {
+    console.log(`[dispatch] HQ message ${newestMsg._id} has no @mentions; skipping.`);
+    return;
   }
-
-  if (targets.size === 0) targets.add("Motoko");
 
   console.log(`📨 New message detected. Routing to: ${Array.from(targets).join(", ")}...`);
   
@@ -70,7 +92,7 @@ async function checkChat() {
     const prompt = `You are ${agent}, an AI agent in Mission Control.
     
     CONTEXT: A user sent a message in the "HQ" channel.
-    MESSAGE: "${newestMsg.text}"
+    MESSAGE: "${messageText}"
     
     INSTRUCTIONS:
     1. Read the message.

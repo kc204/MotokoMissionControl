@@ -111,6 +111,8 @@ export const send = mutation({
 
     for (const tag of mentions) {
       if (tag === "@all") {
+        // Keep broad fan-out explicit and user-driven to avoid agent-triggered reply storms.
+        if (args.agentId) continue;
         for (const agent of mentionedAgents) {
           if (args.agentId && agent._id === args.agentId) continue;
           notifiedAgentIds.add(agent._id);
@@ -179,8 +181,9 @@ export const send = mutation({
       });
     }
 
-    // Notify thread subscribers for task updates, excluding sender and explicit mentions.
-    if (taskId) {
+    // For agent-authored messages, only explicit @mentions notify others.
+    // User-authored task updates still notify subscribers.
+    if (taskId && !args.agentId) {
       const subscribers = await ctx.db
         .query("taskSubscriptions")
         .withIndex("by_taskId", (q) => q.eq("taskId", taskId))
