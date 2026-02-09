@@ -6,24 +6,17 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import { exec } from "child_process";
 import { promisify } from "util";
-import * as dotenv from "dotenv";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import { loadMissionControlEnv, buildTsxCommand } from "./lib/mission-control";
 
-// Fix env path resolution
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, "../.env.local");
-
-dotenv.config({ path: envPath });
-
-if (!process.env.NEXT_PUBLIC_CONVEX_URL) {
-  console.error("❌ ERROR: NEXT_PUBLIC_CONVEX_URL not found in", envPath);
-  process.exit(1);
-}
+loadMissionControlEnv();
 
 const execAsync = promisify(exec);
-const client = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+if (!convexUrl) {
+    throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
+}
+
+const client = new ConvexHttpClient(convexUrl);
 
 // Mapping: Convex Name -> OpenClaw Agent ID
 const AGENT_MAP: Record<string, string> = {
@@ -36,8 +29,6 @@ const AGENT_MAP: Record<string, string> = {
 
 async function main() {
   console.log("🎮 Orchestrator: Checking for work...");
-
-  // 1. Check for pending chat messages (directed at agents)
   await checkChat();
 }
 
@@ -45,14 +36,12 @@ async function checkChat() {
   const messages = await client.query(api.messages.list, { channel: "hq" });
   if (messages.length === 0) return;
 
-  // messages are returned oldest -> newest by the API wrapper usually?
-  // Let's assume the API returns [oldest, ..., newest] based on my previous check.
   const newestMsg = messages[messages.length - 1];
 
   // If the last message is from an agent, we're done (they replied).
   if (newestMsg.agentId) return; 
 
-  // It's a user message. Routing logic:
+  // Routing logic...
   const text = newestMsg.text.toLowerCase();
   const targets = new Set<string>();
 
@@ -62,29 +51,38 @@ async function checkChat() {
   if (text.includes("@forge") || text.includes("code")) targets.add("Forge");
   if (text.includes("@pulse") || text.includes("monitor")) targets.add("Pulse");
   
-  // If "team" or "everyone" is mentioned, add everyone
   if (text.includes("team") || text.includes("everyone") || text.includes("all agents")) {
-    targets.add("Motoko");
-    targets.add("Recon");
-    targets.add("Quill");
-    targets.add("Forge");
-    targets.add("Pulse");
+    targets.add("Motoko"); targets.add("Recon"); targets.add("Quill"); targets.add("Forge"); targets.add("Pulse");
   }
 
-  // Default to Motoko if no specific target found
   if (targets.size === 0) targets.add("Motoko");
 
   console.log(`📨 New message detected. Routing to: ${Array.from(targets).join(", ")}...`);
   
   for (const agent of targets) {
-    const prompt = `New message in HQ from User: "${newestMsg.text}".
+    // Use buildTsxCommand for reliable absolute paths
+    const reportCmd = buildTsxCommand("report.ts", ["chat", agent, "YOUR_RESPONSE_HERE"]);
     
-    Please reply to the team by running this command:
-    npx tsx scripts/report.ts chat ${agent} "YOUR_RESPONSE_HERE"
+    // We need to escape quotes carefully for the prompt
+    // The prompt is passed to --task "..."
+    // The reportCmd contains quotes (e.g. C:\Users\...) which might break nested quotes.
     
-    Keep it short and in-character.`;
+    // Simplified prompt construction
+    const prompt = `You are ${agent}, an AI agent in Mission Control.
+    
+    CONTEXT: A user sent a message in the "HQ" channel.
+    MESSAGE: "${newestMsg.text}"
+    
+    INSTRUCTIONS:
+    1. Read the message.
+    2. To reply, RUN THIS COMMAND:
+       ${reportCmd}
+    
+    3. If you need to see previous messages, run:
+       npx tsx "${workDir}/scripts/report.ts" list-messages hq
+    
+    DO NOT try to "browse" the channel. Use the CLI commands provided.`;
 
-    // Spawn in parallel
     spawnAgent(agent, prompt);
   }
 }

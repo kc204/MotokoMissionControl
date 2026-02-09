@@ -98,6 +98,16 @@ export const getByName = query({
   },
 });
 
+export const getBySessionKey = query({
+  args: { sessionKey: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("agents")
+      .withIndex("by_sessionKey", (q) => q.eq("sessionKey", args.sessionKey))
+      .first();
+  },
+});
+
 export const listByRole = query({
   args: { role: v.string() },
   handler: async (ctx, args) => {

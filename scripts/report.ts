@@ -113,9 +113,10 @@ async function main() {
     }
 
     case "list-messages": {
-      const [taskId] = args;
+      const [channel] = args;
+      const targetChannel = channel === "hq" ? "hq" : `task:${channel}`;
       // @ts-ignore
-      const messages = await client.query(api.messages.list, { channel: `task:${taskId}` });
+      const messages = await client.query(api.messages.list, { channel: targetChannel });
       console.log(JSON.stringify(messages, null, 2));
       break;
     }

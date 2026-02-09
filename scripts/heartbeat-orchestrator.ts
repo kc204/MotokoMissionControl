@@ -53,21 +53,18 @@ function sessionKeyFromAgentId(agentId: string) {
 }
 
 function formatTasks(tasks: Array<{ title: string; status: string; priority: string }>, limit: number) {
-  if (tasks.length === 0) return "- none";
-  return tasks
-    .slice(0, limit)
-    .map((t, i) => `${i + 1}. [${t.status}|${t.priority}] ${t.title}`)
-    .join("\n");
+  if (tasks.length === 0) return "no active tasks";
+  return `${tasks.length} active task(s)`;
 }
 
 function formatNotifications(notifications: Array<{ content: string }>, limit: number) {
-  if (notifications.length === 0) return "- none";
-  return notifications.slice(0, limit).map((n, i) => `${i + 1}. ${n.content}`).join("\n");
+  if (notifications.length === 0) return "no pending notifications";
+  return `${notifications.length} pending notification(s)`;
 }
 
 function formatActivity(activities: Array<{ message: string }>, limit: number) {
-  if (activities.length === 0) return "- none";
-  return activities.slice(0, limit).map((a, i) => `${i + 1}. ${a.message}`).join("\n");
+  if (activities.length === 0) return "no recent team activity";
+  return `${activities.length} recent team activities`;
 }
 
 async function getHeartbeatConfig() {
@@ -86,19 +83,19 @@ async function getHeartbeatConfig() {
 }
 
 async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> {
+  const invokeScript = buildTsxCommand("invoke-agent.ts");
+  const [tsx, scriptPath] = invokeScript.split(" ");
+  
   await new Promise<void>((resolve, reject) => {
-    const child = spawnOpenClaw(["agent", "--agent", agentId, "--message", prompt, "--json"]);
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    const child = spawn(tsx, [scriptPath, "--agent", agentId, "--message", prompt], { stdio: "inherit" });
+    
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
       if (code === 0) {
         resolve();
-        return;
+      } else {
+        reject(new Error(`invoke-agent.ts exited with code ${code}`));
       }
-      reject(new Error(stderr || `openclaw exited with code ${code}`));
     });
   });
 }
