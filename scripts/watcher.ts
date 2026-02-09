@@ -26,12 +26,13 @@ const RETRY_MAX_MS = Number(process.env.WATCHER_RETRY_MAX_MS || 600000);
 const HISTORY_TTL_MS = Number(process.env.WATCHER_HISTORY_TTL_MS || 3600000);
 
 const AGENT_ID_MAP: Record<string, string> = {
-  Motoko: "main",
+  Motoko: "researcher",
   Recon: "researcher",
   Quill: "writer",
   Forge: "developer",
   Pulse: "monitor",
 };
+const WATCHER_AGENT_IDS = Array.from(new Set(Object.values(AGENT_ID_MAP)));
 
 const state = {
   models: new Map<string, string>(),
@@ -84,6 +85,24 @@ async function findAgentIndex(agentId: string): Promise<number> {
     return list.findIndex((entry: { id?: unknown }) => entry?.id === agentId);
   } catch {
     return -1;
+  }
+}
+
+async function getConfiguredOpenClawAgentIds(): Promise<Set<string>> {
+  try {
+    const configPath = path.join(os.homedir(), ".openclaw", "openclaw.json");
+    const content = await fs.readFile(configPath, "utf-8");
+    const json = JSON.parse(content);
+    const list = Array.isArray(json?.agents?.list) ? json.agents.list : [];
+    return new Set(
+      list
+        .map((entry: { id?: unknown }) =>
+          typeof entry?.id === "string" && entry.id.trim() ? entry.id.trim() : null
+        )
+        .filter((id: string | null): id is string => Boolean(id))
+    );
+  } catch {
+    return new Set<string>();
   }
 }
 
@@ -143,10 +162,6 @@ async function syncAuth(now: number) {
 
   const activeProfile = await client.query(api.auth.getActive).catch(() => null);
   if (!activeProfile?.profileId) return;
-  if (!state.authProfile) {
-    state.authProfile = activeProfile.profileId;
-    return;
-  }
   if (state.authProfile === activeProfile.profileId) return;
 
   try {
@@ -154,10 +169,26 @@ async function syncAuth(now: number) {
     if (!provider) {
       throw new Error(`Invalid profile id format: ${activeProfile.profileId}`);
     }
-    await execAsync(
-      `openclaw models auth order set --provider "${provider}" "${activeProfile.profileId}"`
+    const configured = await getConfiguredOpenClawAgentIds();
+    const targetIds = WATCHER_AGENT_IDS.filter((id) => configured.has(id));
+
+    if (targetIds.length === 0) {
+      await execAsync(
+        `openclaw models auth order set --provider "${provider}" "${activeProfile.profileId}"`
+      );
+      console.log(`[auth-sync] set auth profile (default scope) -> ${activeProfile.profileId}`);
+      state.authProfile = activeProfile.profileId;
+      return;
+    }
+
+    for (const agentId of targetIds) {
+      await execAsync(
+        `openclaw models auth order set --agent "${agentId}" --provider "${provider}" "${activeProfile.profileId}"`
+      );
+    }
+    console.log(
+      `[auth-sync] set auth profile for agents [${targetIds.join(", ")}] -> ${activeProfile.profileId}`
     );
-    console.log(`[auth-sync] set auth profile -> ${activeProfile.profileId}`);
     state.authProfile = activeProfile.profileId;
   } catch (error) {
     console.error("[auth-sync] switch failed:", error);
