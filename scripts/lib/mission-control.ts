@@ -32,7 +32,7 @@ export function buildTsxCommand(scriptFileName: string, args: string[] = []) {
   const NPX_PATH = "C:\\\\Program Files\\\\nodejs\\\\npx.cmd";
   const scriptPath = resolveScriptPath(scriptFileName);
   const argText = args.map((arg) => quoteArg(arg)).join(" ");
-  return `${NPX_PATH} tsx ${quoteArg(scriptPath)}${argText ? ` ${argText}` : ""}`;
+  return `"${NPX_PATH}" tsx ${quoteArg(scriptPath)}${argText ? ` ${argText}` : ""}`;
 }
 
 export function normalizeModelId(modelId?: string | null) {
