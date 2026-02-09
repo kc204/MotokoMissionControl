@@ -67,6 +67,7 @@ export const send = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const mentions = parseMentions(args.text);
+    const isHqChannel = args.channel === "hq";
     const taskId = args.taskId ?? (taskIdFromChannel(args.channel) as any);
     const messageId = await ctx.db.insert("messages", {
       taskId,
@@ -109,7 +110,10 @@ export const send = mutation({
       }
     }
 
-    for (const tag of mentions) {
+    // HQ routing is handled by watcher/orchestrator, so avoid duplicate
+    // notification-delivery fanout from mention notifications in HQ.
+    if (!isHqChannel) {
+      for (const tag of mentions) {
       if (tag === "@all") {
         // Keep broad fan-out explicit and user-driven to avoid agent-triggered reply storms.
         if (args.agentId) continue;
@@ -179,6 +183,7 @@ export const send = mutation({
         delivered: false,
         createdAt: now,
       });
+    }
     }
 
     // For agent-authored messages, only explicit @mentions notify others.

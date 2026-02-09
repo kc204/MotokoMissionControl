@@ -56,6 +56,34 @@ function parseArgs() {
 async function reportToHq(convexAgentId: string, text: string) {
   const trimmed = text.trim();
   if (!trimmed) return;
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  const normalizedTrimmed = normalize(trimmed);
+  const hasRecentSimilarMessage = async () => {
+    const recent = await client.query(api.messages.list, { channel: "hq" });
+    const now = Date.now();
+    return recent.some((msg: any) => {
+      const senderId = (msg.fromAgentId ?? msg.agentId ?? "") as string;
+      const body = (msg.text ?? msg.content ?? "").trim();
+      const normalizedBody = normalize(body);
+      const createdAt = Number(msg.createdAt ?? 0);
+      return (
+        senderId === convexAgentId &&
+        (
+          body === trimmed ||
+          normalizedBody === normalizedTrimmed ||
+          normalizedTrimmed.startsWith(normalizedBody) ||
+          normalizedBody.startsWith(normalizedTrimmed)
+        ) &&
+        createdAt > 0 &&
+        now - createdAt <= 30000
+      );
+    });
+  };
+  if (await hasRecentSimilarMessage()) return;
+  // Avoid race with agent report command writing just before fallback posts.
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  if (await hasRecentSimilarMessage()) return;
+
   await client.mutation(api.messages.send, {
     channel: "hq",
     text: trimmed,
