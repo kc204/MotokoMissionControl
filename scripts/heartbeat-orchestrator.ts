@@ -124,7 +124,7 @@ async function main() {
   });
   const assignedTasks = await client.query(api.tasks.getAssigned, { agentId: convexAgent._id });
   const activeTasks = assignedTasks.filter((t) => t.status !== "done");
-  const activityLimit = Math.max(8, heartbeatConfig.heartbeatMaxActivities * 2);
+  const activityLimit = Math.max(1, heartbeatConfig.heartbeatMaxActivities);
   const activities = await client.query(api.activities.recent, { limit: activityLimit });
 
   if (pendingNotifications.length === 0 && activeTasks.length === 0) {
@@ -153,7 +153,7 @@ async function main() {
     "(2) work relevant items;",
     heartbeatConfig.heartbeatRequireChatUpdate
       ? `(3) post at least one concrete update via ${reportScriptCommand} chat ${convexAgent.name} "<update>";`
-      : `(3) post a chat update only if you completed meaningful work; otherwise skip chat output;`,
+      : `(3) if you completed meaningful work, post a chat update; otherwise, do not post a chat update;`,
     `if needed update tasks via Convex CLI;`,
     `(4) finish with ${reportScriptCommand} heartbeat ${convexAgent.name} idle "Heartbeat complete".`,
     "Do not output NO_REPLY. If blocked, state blocker and owner. If report command fails, include full error and retry once.",
