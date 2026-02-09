@@ -3,7 +3,7 @@ import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import os from "os";
-import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
+import { buildTsxCommand, loadMissionControlEnv, resolveScriptPath } from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -34,6 +34,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   let agentId = "";
   let message = "";
+  let convexAgentName = "";
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--agent" && args[i + 1]) {
       agentId = args[i + 1];
@@ -41,27 +42,43 @@ function parseArgs() {
     } else if (args[i] === "--message" && args[i + 1]) {
       message = args[i + 1];
       i++;
+    } else if (args[i] === "--convex-agent-name" && args[i + 1]) {
+      convexAgentName = args[i + 1];
+      i++;
     }
   }
   if (!agentId || !message) {
     throw new Error(`Usage: ${buildTsxCommand("invoke-agent.ts", ["--agent <id>", "--message <text>"])}`);
   }
-  return { agentId, message };
+  return { agentId, message, convexAgentName };
+}
+
+async function reportToHq(convexAgentId: string, text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  await client.mutation(api.messages.send, {
+    channel: "hq",
+    text: trimmed,
+    agentId: convexAgentId as any,
+    fromUser: false,
+  });
+}
+
+function isIgnoredTerminalOutput(text: string) {
+  const normalized = text.trim();
+  return normalized === "HEARTBEAT_OK" || normalized === "NO_REPLY";
 }
 
 async function main() {
-  const { agentId, message } = parseArgs();
+  const { agentId, message, convexAgentName } = parseArgs();
   const sessionKey = `agent:${agentId}:main`;
 
-  const convexAgent = await client.query(api.agents.getBySessionKey, { sessionKey });
+  const convexAgent = convexAgentName
+    ? await client.query(api.agents.getByName, { name: convexAgentName })
+    : await client.query(api.agents.getBySessionKey, { sessionKey });
   if (!convexAgent) {
     const errorMessage = `Error: Could not find my own agent definition in Convex for sessionKey '${sessionKey}'.`;
     console.error(`[invoke] ${errorMessage}`);
-    // Fallback to trying to report the error using the raw agentId
-    const reportFailure = await spawnAsync(process.execPath, [buildTsxCommand("report.ts"), "chat", agentId, errorMessage]);
-    if(reportFailure.code !== 0) {
-      console.error(`[invoke] Failed to report failure for agent ${agentId}: ${reportFailure.stderr}`);
-    }
     return;
   }
   
@@ -70,7 +87,8 @@ async function main() {
   console.log(`[invoke] Invoking agent '${agentName}' (${agentId}) with message: "${message}"`);
 
   // Construct the prompt with explicit reporting instructions
-  const reportCommand = `${buildTsxCommand("report.ts")} chat ${agentName}`;
+  const reportScriptPath = resolveScriptPath("report.ts");
+  const reportCommand = `npx tsx "${reportScriptPath}" chat ${agentName}`;
   const prompt = `You are the ${agentName} agent. You have been given the following task: "${message}".
   
   Begin your work. For ALL responses, status updates, or final results, you MUST use the following command to report back to the team chat:
@@ -86,9 +104,10 @@ async function main() {
   if (agentRun.code !== 0) {
     console.error(`[invoke] Agent ${agentName} process exited with code ${agentRun.code}`);
     console.error(`[invoke] stderr: ${agentRun.stderr}`);
-    const reportFailure = await spawnAsync(process.execPath, [buildTsxCommand("report.ts"), "chat", agentName, `My process exited with a critical error: ${agentRun.stderr}`]);
-    if(reportFailure.code !== 0) {
-      console.error(`[invoke] Failed to report failure for agent ${agentName}: ${reportFailure.stderr}`);
+    try {
+      await reportToHq(convexAgent._id, `My process exited with a critical error: ${agentRun.stderr}`);
+    } catch (error) {
+      console.error(`[invoke] Failed to report failure for agent ${agentName}:`, error);
     }
     return;
   }
@@ -96,10 +115,14 @@ async function main() {
   const agentTerminalOutput = agentRun.stdout.trim();
   if (agentTerminalOutput) {
     console.log(`[invoke] Agent '${agentName}' sent unexpected output to terminal instead of chat: "${agentTerminalOutput}"`);
-    // Forward the stray output to the chat as a fallback.
-    const reportStrayOutput = await spawnAsync(process.execPath, [buildTsxCommand("report.ts"), "chat", agentName, `(I accidentally spoke to the terminal, sorry.) ${agentTerminalOutput}`]);
-    if(reportStrayOutput.code !== 0) {
-      console.error(`[invoke] Failed to report stray output for agent ${agentName}: ${reportStrayOutput.stderr}`);
+    if (isIgnoredTerminalOutput(agentTerminalOutput)) {
+      console.log(`[invoke] Ignoring terminal sentinel output from '${agentName}': ${agentTerminalOutput}`);
+      return;
+    }
+    try {
+      await reportToHq(convexAgent._id, agentTerminalOutput);
+    } catch (error) {
+      console.error(`[invoke] Failed to report stray output for agent ${agentName}:`, error);
     }
   } else {
     console.log(`[invoke] Agent '${agentName}' process completed without terminal output, as expected.`);

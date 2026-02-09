@@ -26,7 +26,7 @@ const RETRY_MAX_MS = Number(process.env.WATCHER_RETRY_MAX_MS || 600000);
 const HISTORY_TTL_MS = Number(process.env.WATCHER_HISTORY_TTL_MS || 3600000);
 
 const AGENT_ID_MAP: Record<string, string> = {
-  Motoko: "main",
+  Motoko: "motoko",
   Recon: "researcher",
   Quill: "writer",
   Forge: "developer",

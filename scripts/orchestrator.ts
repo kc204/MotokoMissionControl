@@ -4,8 +4,9 @@
 
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import { exec } from "child_process";
-import { loadMissionControlEnv, buildTsxCommand } from "./lib/mission-control";
+import { spawn } from "child_process";
+import os from "os";
+import { loadMissionControlEnv, buildTsxCommand, resolveScriptPath } from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -15,10 +16,11 @@ if (!convexUrl) {
 }
 
 const client = new ConvexHttpClient(convexUrl);
+const IS_WINDOWS = os.platform() === "win32";
 
 // Mapping: Convex Name -> OpenClaw Agent ID
 const AGENT_MAP: Record<string, string> = {
-  "Motoko": "main",
+  "Motoko": "motoko",
   "Recon": "researcher",
   "Quill": "writer",
   "Forge": "developer",
@@ -127,18 +129,42 @@ async function spawnAgent(agentName: string, instruction: string) {
      });
   }
 
-  // Spawn OpenClaw Session
-  const safeInstruction = instruction.replace(/"/g, '\\"');
-  
-  try {
-    const cmd = `openclaw sessions spawn --agent ${openclawId} --task "${safeInstruction}"`;
-    console.log(`> ${cmd}`);
-    
-    exec(cmd, (error, stdout, stderr) => {
-      if (error) console.error(`Spawn error (${agentName}): ${error.message}`);
-      if (stdout) console.log(`Spawn out (${agentName}): ${stdout}`);
-    });
+  const invokeScriptPath = resolveScriptPath("invoke-agent.ts");
+  const tsxArgs = [
+    "tsx",
+    invokeScriptPath,
+    "--agent",
+    openclawId,
+    "--convex-agent-name",
+    agentName,
+    "--message",
+    instruction,
+  ];
 
+  try {
+    console.log(
+      `> npx tsx ${invokeScriptPath} --agent ${openclawId} --convex-agent-name "${agentName}" --message "<...>"`
+    );
+    const child = IS_WINDOWS
+      ? spawn("cmd.exe", ["/d", "/s", "/c", "npx", ...tsxArgs], {
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false,
+        })
+      : spawn("npx", tsxArgs, { stdio: ["ignore", "pipe", "pipe"], shell: false });
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString().trim();
+      if (text) console.log(`Spawn out (${agentName}): ${text}`);
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString().trim();
+      if (text) console.warn(`Spawn err (${agentName}): ${text}`);
+    });
+    child.on("error", (error) => console.error(`Spawn error (${agentName}): ${error.message}`));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        console.error(`Spawn exit (${agentName}): code=${code}`);
+      }
+    });
   } catch (e) {
     console.error("Spawn failed:", e);
   }
