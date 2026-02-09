@@ -26,7 +26,7 @@ const RETRY_MAX_MS = Number(process.env.WATCHER_RETRY_MAX_MS || 600000);
 const HISTORY_TTL_MS = Number(process.env.WATCHER_HISTORY_TTL_MS || 3600000);
 
 const AGENT_ID_MAP: Record<string, string> = {
-  Motoko: "researcher",
+  Motoko: "main",
   Recon: "researcher",
   Quill: "writer",
   Forge: "developer",
@@ -138,15 +138,18 @@ async function syncModels(now: number) {
       continue;
     }
 
-    const index = await findAgentIndex(openclawId);
-    if (index < 0) {
-      console.warn(`[model-sync] could not find OpenClaw agent id "${openclawId}" in config`);
-      state.models.set(agent.name, desiredModel);
-      continue;
-    }
-
     try {
-      await execAsync(`openclaw config set agents.list[${index}].model "${desiredModel}"`);
+      if (openclawId === "main") {
+        await execAsync(`openclaw config set agents.defaults.model.primary "${desiredModel}"`);
+      } else {
+        const index = await findAgentIndex(openclawId);
+        if (index < 0) {
+          console.warn(`[model-sync] could not find OpenClaw agent id "${openclawId}" in config`);
+          state.models.set(agent.name, desiredModel);
+          continue;
+        }
+        await execAsync(`openclaw config set agents.list[${index}].model "${desiredModel}"`);
+      }
       console.log(`[model-sync] ${agent.name} (${openclawId}) -> ${desiredModel}`);
     } catch (error) {
       console.error(`[model-sync] failed for ${agent.name}:`, error);
@@ -184,6 +187,12 @@ async function syncAuth(now: number) {
     for (const agentId of targetIds) {
       await execAsync(
         `openclaw models auth order set --agent "${agentId}" --provider "${provider}" "${activeProfile.profileId}"`
+      );
+    }
+    if (WATCHER_AGENT_IDS.includes("main")) {
+      // Also apply default-scope auth order for the implicit main agent.
+      await execAsync(
+        `openclaw models auth order set --provider "${provider}" "${activeProfile.profileId}"`
       );
     }
     console.log(
