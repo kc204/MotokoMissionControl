@@ -91,6 +91,15 @@ async function main() {
   const reportCommand = `npx tsx "${reportScriptPath}" chat ${agentName}`;
   const prompt = `You are the ${agentName} agent. You have been given the following task: "${message}".
   
+  Response policy:
+  - If this is a simple conversational/creative ask (for example: haiku, short reply, explanation), do NOT run tools, do NOT run shell commands, do NOT call web/browser, and do NOT touch files.
+  - For those asks, respond directly in HQ chat only.
+  - Only use tools/commands/files when the user explicitly asks for implementation, diagnostics, or code changes.
+
+  Approval policy:
+  - Do not start or execute any task unless the user message explicitly includes a line in this format: APPROVE: <task-id-or-name>.
+  - If APPROVE is missing, ask for approval in HQ chat and wait.
+
   Begin your work. For ALL responses, status updates, or final results, you MUST use the following command to report back to the team chat:
   
   ${reportCommand} "Your message here"

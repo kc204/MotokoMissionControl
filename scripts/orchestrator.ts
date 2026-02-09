@@ -6,7 +6,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import { spawn } from "child_process";
 import os from "os";
-import { loadMissionControlEnv, buildTsxCommand, resolveScriptPath } from "./lib/mission-control";
+import { loadMissionControlEnv, resolveScriptPath } from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -82,31 +82,8 @@ async function checkChat() {
   console.log(`📨 New message detected. Routing to: ${Array.from(targets).join(", ")}...`);
   
   for (const agent of targets) {
-    // Use buildTsxCommand for reliable absolute paths
-    const reportCmd = buildTsxCommand("report.ts", ["chat", agent, "YOUR_RESPONSE_HERE"]);
-    const listCmd = buildTsxCommand("report.ts", ["list-messages", "hq"]);
-    
-    // We need to escape quotes carefully for the prompt
-    // The prompt is passed to --task "..."
-    // The reportCmd contains quotes (e.g. C:\Users\...) which might break nested quotes.
-    
-    // Simplified prompt construction
-    const prompt = `You are ${agent}, an AI agent in Mission Control.
-    
-    CONTEXT: A user sent a message in the "HQ" channel.
-    MESSAGE: "${messageText}"
-    
-    INSTRUCTIONS:
-    1. Read the message.
-    2. To reply, RUN THIS COMMAND:
-       ${reportCmd}
-    
-    3. If you need to see previous messages, run:
-       ${listCmd}
-    
-    DO NOT try to "browse" the channel. Use the CLI commands provided.`;
-
-    spawnAgent(agent, prompt);
+    // Pass raw user text only; invoke-agent.ts owns reply policy.
+    spawnAgent(agent, messageText);
   }
 }
 

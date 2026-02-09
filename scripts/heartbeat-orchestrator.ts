@@ -13,6 +13,11 @@ const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const client = new ConvexHttpClient(convexUrl);
 const reportScriptCommand = buildTsxCommand("report.ts");
+const HEARTBEAT_NOTIFICATION_MAX_AGE_MS = Math.max(
+  0,
+  Number(process.env.HEARTBEAT_NOTIFICATION_MAX_AGE_MS || 6 * 60 * 60 * 1000)
+);
+const ACTIONABLE_TASK_STATUSES = new Set(["inbox", "assigned", "in_progress", "testing", "blocked"]);
 const DEFAULT_HEARTBEAT_CONFIG = {
   heartbeatEnabled: true,
   heartbeatMaxNotifications: 3,
@@ -120,12 +125,23 @@ async function main() {
     throw new Error(`No Convex agent maps to OpenClaw id "${openclawAgentId}"`);
   }
 
-  const pendingNotifications = await client.query(api.notifications.getForAgent, {
+  const rawNotifications = await client.query(api.notifications.getForAgent, {
     agentId: convexAgent._id,
     includeDelivered: false,
   });
+  const now = Date.now();
+  const staleNotifications = HEARTBEAT_NOTIFICATION_MAX_AGE_MS
+    ? rawNotifications.filter((n) => now - n.createdAt > HEARTBEAT_NOTIFICATION_MAX_AGE_MS)
+    : [];
+  for (const notification of staleNotifications) {
+    await client.mutation(api.notifications.markDelivered, { id: notification._id });
+  }
+  const pendingNotifications = HEARTBEAT_NOTIFICATION_MAX_AGE_MS
+    ? rawNotifications.filter((n) => now - n.createdAt <= HEARTBEAT_NOTIFICATION_MAX_AGE_MS)
+    : rawNotifications;
+
   const assignedTasks = await client.query(api.tasks.getAssigned, { agentId: convexAgent._id });
-  const activeTasks = assignedTasks.filter((t) => t.status !== "done");
+  const activeTasks = assignedTasks.filter((t) => ACTIONABLE_TASK_STATUSES.has(t.status));
   const activityLimit = Math.max(1, heartbeatConfig.heartbeatMaxActivities);
   const activities = await client.query(api.activities.recent, { limit: activityLimit });
 
