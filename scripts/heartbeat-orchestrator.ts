@@ -83,11 +83,13 @@ async function getHeartbeatConfig() {
 }
 
 async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> {
-  const invokeScript = buildTsxCommand("invoke-agent.ts");
-  const [tsx, scriptPath] = invokeScript.split(" ");
+  const command = buildTsxCommand("invoke-agent.ts", ["--agent", agentId, "--message", prompt]);
   
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(tsx, [scriptPath, "--agent", agentId, "--message", prompt], { stdio: "inherit" });
+    // On Windows, execute the full command string via cmd.exe to handle paths with spaces.
+    const child = IS_WINDOWS
+      ? spawn("cmd.exe", ["/d", "/s", "/c", command], { stdio: "inherit" })
+      : spawn(command, { stdio: "inherit", shell: true });
     
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
