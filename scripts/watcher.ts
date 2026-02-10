@@ -21,9 +21,12 @@ const execAsync = promisify(exec);
 const POLL_MS = Number(process.env.WATCHER_POLL_MS || 3000);
 const MODELS_SYNC_MS = Number(process.env.WATCHER_MODELS_SYNC_MS || 15000);
 const AUTH_SYNC_MS = Number(process.env.WATCHER_AUTH_SYNC_MS || 15000);
+const IDENTITY_SYNC_MS = Number(process.env.WATCHER_IDENTITY_SYNC_MS || 8000);
 const RETRY_BASE_MS = Number(process.env.WATCHER_RETRY_BASE_MS || 60000);
 const RETRY_MAX_MS = Number(process.env.WATCHER_RETRY_MAX_MS || 600000);
 const HISTORY_TTL_MS = Number(process.env.WATCHER_HISTORY_TTL_MS || 3600000);
+const OPENCLAW_WORKSPACE_ROOT =
+  process.env.OPENCLAW_WORKSPACE_ROOT || path.join(os.homedir(), ".openclaw", "workspace");
 
 const AGENT_ID_MAP: Record<string, string> = {
   Motoko: "motoko",
@@ -44,6 +47,8 @@ const state = {
   retryAt: new Map<string, number>(),
   lastModelsSyncAt: 0,
   lastAuthSyncAt: 0,
+  identityByAgent: new Map<string, string>(),
+  lastIdentitySyncAt: 0,
 };
 
 function normalizeModelName(modelName?: string) {
@@ -103,6 +108,108 @@ async function getConfiguredOpenClawAgentIds(): Promise<Set<string>> {
     );
   } catch {
     return new Set<string>();
+  }
+}
+
+async function getConfiguredOpenClawAgents(): Promise<
+  Array<{ id: string; workspace?: string | null }>
+> {
+  try {
+    const configPath = path.join(os.homedir(), ".openclaw", "openclaw.json");
+    const content = await fs.readFile(configPath, "utf-8");
+    const json = JSON.parse(content);
+    const list = Array.isArray(json?.agents?.list) ? json.agents.list : [];
+    return list
+      .map((entry: { id?: unknown; workspace?: unknown }) => {
+        const id = typeof entry?.id === "string" ? entry.id.trim() : "";
+        const workspace =
+          typeof entry?.workspace === "string" && entry.workspace.trim()
+            ? entry.workspace.trim()
+            : null;
+        return id ? { id, workspace } : null;
+      })
+      .filter((entry: { id: string; workspace?: string | null } | null): entry is {
+        id: string;
+        workspace?: string | null;
+      } => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function buildIdentityContent(agent: {
+  name: string;
+  role: string;
+  level?: string;
+  systemPrompt?: string;
+  character?: string;
+  lore?: string;
+}) {
+  const role = agent.role?.trim() || "Agent";
+  const level = agent.level?.trim() || "SPC";
+  const systemPrompt = agent.systemPrompt?.trim() || "";
+  const character = agent.character?.trim() || "";
+  const lore = agent.lore?.trim() || "";
+
+  const lines = [
+    `# Identity: ${agent.name}`,
+    "",
+    `## Role`,
+    `${role} (${level})`,
+    "",
+    `## System Prompt`,
+    systemPrompt || "Not specified.",
+    "",
+    `## Character`,
+    character || "Not specified.",
+    "",
+    `## Lore`,
+    lore || "Not specified.",
+    "",
+    `## Behavioral Contract`,
+    "- Follow user instructions exactly.",
+    "- Keep responses concise and actionable.",
+    "- Ask for clarification when requirements are ambiguous.",
+    "",
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function defaultWorkspaceForAgentId(agentId: string) {
+  if (agentId === "main") return OPENCLAW_WORKSPACE_ROOT;
+  return path.join(OPENCLAW_WORKSPACE_ROOT, agentId);
+}
+
+async function syncIdentity(now: number) {
+  if (now - state.lastIdentitySyncAt < IDENTITY_SYNC_MS) return;
+  state.lastIdentitySyncAt = now;
+
+  const [agents, configuredAgents] = await Promise.all([
+    client.query(api.agents.list),
+    getConfiguredOpenClawAgents(),
+  ]);
+  const configuredById = new Map(configuredAgents.map((entry) => [entry.id, entry]));
+
+  for (const agent of agents) {
+    const openclawId = AGENT_ID_MAP[agent.name];
+    if (!openclawId) continue;
+
+    const identityContent = buildIdentityContent(agent);
+    const prev = state.identityByAgent.get(agent.name);
+    if (prev === identityContent) continue;
+
+    const configured = configuredById.get(openclawId);
+    const workspaceRoot = configured?.workspace || defaultWorkspaceForAgentId(openclawId);
+    const identityPath = path.join(workspaceRoot, "IDENTITY.md");
+
+    try {
+      await fs.mkdir(workspaceRoot, { recursive: true });
+      await fs.writeFile(identityPath, identityContent, "utf-8");
+      state.identityByAgent.set(agent.name, identityContent);
+      console.log(`[identity-sync] ${agent.name} (${openclawId}) -> ${identityPath}`);
+    } catch (error) {
+      console.error(`[identity-sync] failed for ${agent.name}:`, error);
+    }
   }
 }
 
@@ -262,6 +369,7 @@ async function main() {
     try {
       await syncModels(now);
       await syncAuth(now);
+      await syncIdentity(now);
       await checkChat(now);
       pruneHistory(now);
     } catch (error) {
