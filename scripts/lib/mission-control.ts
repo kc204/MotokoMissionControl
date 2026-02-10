@@ -1,7 +1,6 @@
 import * as dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import os from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,12 +29,8 @@ export function resolveScriptPath(scriptFileName: string) {
 }
 
 export function buildTsxCommand(scriptFileName: string, args: string[] = []) {
-  const NPX_PATH = "C:\\Program Files\\nodejs\\npx.cmd";
   const scriptPath = resolveScriptPath(scriptFileName);
   const argText = args.map((arg) => quoteArg(arg)).join(" ");
-  if (os.platform() === "win32") {
-    return `& "${NPX_PATH}" tsx ${quoteArg(scriptPath)}${argText ? ` ${argText}` : ""}`;
-  }
   return `npx tsx ${quoteArg(scriptPath)}${argText ? ` ${argText}` : ""}`;
 }
 

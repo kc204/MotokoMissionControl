@@ -13,10 +13,12 @@ const HEARTBEAT_INTERVAL_MINUTES = Math.max(
 type Job = {
   id: string;
   name: string;
+  createdAtMs?: number;
+  updatedAtMs?: number;
 };
 
 const SCHEDULES: Array<{ agentId: string; minuteOffset: number }> = [
-  { agentId: "main", minuteOffset: 0 },
+  { agentId: "motoko", minuteOffset: 0 },
   { agentId: "developer", minuteOffset: 2 },
   { agentId: "writer", minuteOffset: 4 },
   { agentId: "researcher", minuteOffset: 8 },
@@ -101,7 +103,32 @@ async function main() {
   } catch (error) {
     console.error("[cron:warn] unable to fetch existing jobs, continuing with best-effort add:", error);
   }
-  const byName = new Map(jobs.map((job) => [job.name, job]));
+  const jobsByName = new Map<string, Job[]>();
+  for (const job of jobs) {
+    const list = jobsByName.get(job.name) ?? [];
+    list.push(job);
+    jobsByName.set(job.name, list);
+  }
+  const byName = new Map<string, Job>();
+  for (const [name, entries] of jobsByName) {
+    const sorted = [...entries].sort((a, b) => {
+      const aTs = a.updatedAtMs ?? a.createdAtMs ?? 0;
+      const bTs = b.updatedAtMs ?? b.createdAtMs ?? 0;
+      return bTs - aTs;
+    });
+    const keep = sorted[0];
+    if (keep) byName.set(name, keep);
+    const duplicates = sorted.slice(1);
+    for (const duplicate of duplicates) {
+      if (!duplicate.name.startsWith(HEARTBEAT_PREFIX)) continue;
+      try {
+        await runOpenClaw(["cron", "edit", duplicate.id, "--disable"]);
+        console.log(`[cron:disable-duplicate] ${duplicate.name} (${duplicate.id})`);
+      } catch (error) {
+        console.error(`[cron:disable-duplicate:error] ${duplicate.name} (${duplicate.id}):`, error);
+      }
+    }
+  }
   const desiredNames = new Set(SCHEDULES.map((schedule) => `mc-heartbeat-${schedule.agentId}`));
 
   for (const job of jobs) {

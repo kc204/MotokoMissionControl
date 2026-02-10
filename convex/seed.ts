@@ -12,7 +12,7 @@ const canonicalAgents = [
       heartbeat: "google/gemini-2.5-flash",
       fallback: "google-antigravity/claude-sonnet-4-5",
     },
-    sessionKey: "agent:main:main",
+    sessionKey: "agent:motoko:main",
   },
   {
     name: "Forge",

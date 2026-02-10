@@ -22,7 +22,7 @@ function sessionKeyToAgentName(sessionKey?: string | null) {
   const parts = sessionKey.split(":");
   if (parts.length < 2 || parts[0] !== "agent") return null;
   const id = parts[1];
-  if (id === "main") return "Motoko";
+  if (id === "main" || id === "motoko") return "Motoko";
   if (id === "developer") return "Forge";
   if (id === "writer") return "Quill";
   if (id === "researcher") return "Recon";

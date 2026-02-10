@@ -54,6 +54,7 @@ function parseArgs() {
 }
 
 function sessionKeyFromAgentId(agentId: string) {
+  if (agentId === "main") return "agent:motoko:main";
   return `agent:${agentId}:main`;
 }
 
@@ -119,7 +120,9 @@ async function main() {
   const agents = await client.query(api.agents.list);
   const convexAgent =
     agents.find((a) => a.sessionKey === expectedSessionKey) ||
-    (openclawAgentId === "main" ? agents.find((a) => a.name === "Motoko") : undefined);
+    ((openclawAgentId === "main" || openclawAgentId === "motoko")
+      ? agents.find((a) => a.name === "Motoko")
+      : undefined);
 
   if (!convexAgent) {
     throw new Error(`No Convex agent maps to OpenClaw id "${openclawAgentId}"`);

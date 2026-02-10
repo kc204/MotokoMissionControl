@@ -58,6 +58,7 @@ async function reportToHq(convexAgentId: string, text: string) {
   if (!trimmed) return;
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
   const normalizedTrimmed = normalize(trimmed);
+  const looksMultiline = /\r?\n/.test(trimmed);
   const hasRecentSimilarMessage = async () => {
     const recent = await client.query(api.messages.list, { channel: "hq" });
     const now = Date.now();
@@ -71,7 +72,6 @@ async function reportToHq(convexAgentId: string, text: string) {
         (
           body === trimmed ||
           normalizedBody === normalizedTrimmed ||
-          normalizedTrimmed.startsWith(normalizedBody) ||
           normalizedBody.startsWith(normalizedTrimmed)
         ) &&
         createdAt > 0 &&
@@ -83,6 +83,27 @@ async function reportToHq(convexAgentId: string, text: string) {
   // Avoid race with agent report command writing just before fallback posts.
   await new Promise((resolve) => setTimeout(resolve, 900));
   if (await hasRecentSimilarMessage()) return;
+  // If we only saw a short partial earlier (common with multiline terminal output),
+  // allow posting the full fallback to avoid losing content in HQ.
+  if (looksMultiline) {
+    const recent = await client.query(api.messages.list, { channel: "hq" });
+    const now = Date.now();
+    const partialOnly = recent.some((msg: any) => {
+      const senderId = (msg.fromAgentId ?? msg.agentId ?? "") as string;
+      const body = (msg.text ?? msg.content ?? "").trim();
+      const normalizedBody = normalize(body);
+      const createdAt = Number(msg.createdAt ?? 0);
+      return (
+        senderId === convexAgentId &&
+        createdAt > 0 &&
+        now - createdAt <= 30000 &&
+        normalizedTrimmed.startsWith(normalizedBody) &&
+        normalizedBody.length > 0 &&
+        normalizedBody.length < normalizedTrimmed.length
+      );
+    });
+    if (!partialOnly && (await hasRecentSimilarMessage())) return;
+  }
 
   await client.mutation(api.messages.send, {
     channel: "hq",
@@ -120,8 +141,8 @@ async function main() {
   const prompt = `You are the ${agentName} agent. You have been given the following task: "${message}".
   
   Response policy:
-  - If this is a simple conversational/creative ask (for example: haiku, short reply, explanation), do NOT run tools, do NOT run shell commands, do NOT call web/browser, and do NOT touch files.
-  - For those asks, respond directly in HQ chat only.
+  - If this is a simple conversational/creative ask (for example: haiku, short reply, explanation), do NOT run tools, do NOT call web/browser, and do NOT touch files.
+  - For those asks, produce exactly one HQ response.
   - Only use tools/commands/files when the user explicitly asks for implementation, diagnostics, or code changes.
 
   Approval policy:
