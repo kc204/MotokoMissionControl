@@ -176,14 +176,14 @@ export const createAgent = mutation({
       models: {
         thinking:
           normalizeModelName(args.thinkingModel) ??
-          "google-antigravity/claude-opus-4-5-thinking",
+          "kimi-coding/k2p5",
         execution: normalizeModelName(args.executionModel),
         heartbeat:
           normalizeModelName(args.heartbeatModel) ??
           "google/gemini-2.5-flash",
         fallback:
           normalizeModelName(args.fallbackModel) ??
-          "google-antigravity/claude-sonnet-4-5",
+          "google/gemini-2.5-flash",
       },
       createdAt: now,
       updatedAt: now,

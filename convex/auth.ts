@@ -3,16 +3,10 @@ import { v } from "convex/values";
 
 const DEFAULT_PROFILES = [
   {
-    email: "kaceynwadike@gmail.com",
-    provider: "google-antigravity",
-    profileId: "google-antigravity:kaceynwadike@gmail.com",
+    email: "default",
+    provider: "kimi-coding",
+    profileId: "kimi-coding:default",
     isActive: true, // Default
-  },
-  {
-    email: "choikennedy2@gmail.com",
-    provider: "google-antigravity",
-    profileId: "google-antigravity:choikennedy2@gmail.com",
-    isActive: false,
   },
   {
     email: "default",

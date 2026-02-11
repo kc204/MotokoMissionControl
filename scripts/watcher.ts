@@ -231,18 +231,12 @@ async function syncModels(now: number) {
     const desiredModel = normalizeModelName(desiredRaw);
     const previous = state.models.get(agent.name);
 
-    if (!previous) {
-      state.models.set(agent.name, desiredModel);
-      continue;
-    }
     if (previous === desiredModel) continue;
 
     if (!isAvailableModel(desiredModel, catalog)) {
       console.warn(
-        `[model-preflight] ${agent.name} (${openclawId}) unavailable model(s): thinking=${desiredModel}`
+        `[model-preflight] ${agent.name} (${openclawId}) not in runtime catalog: thinking=${desiredModel}; attempting apply anyway`
       );
-      state.models.set(agent.name, desiredModel);
-      continue;
     }
 
     try {
@@ -252,16 +246,14 @@ async function syncModels(now: number) {
         const index = await findAgentIndex(openclawId);
         if (index < 0) {
           console.warn(`[model-sync] could not find OpenClaw agent id "${openclawId}" in config`);
-          state.models.set(agent.name, desiredModel);
           continue;
         }
         await execAsync(`openclaw config set agents.list[${index}].model "${desiredModel}"`);
       }
       console.log(`[model-sync] ${agent.name} (${openclawId}) -> ${desiredModel}`);
+      state.models.set(agent.name, desiredModel);
     } catch (error) {
       console.error(`[model-sync] failed for ${agent.name}:`, error);
-    } finally {
-      state.models.set(agent.name, desiredModel);
     }
   }
 }

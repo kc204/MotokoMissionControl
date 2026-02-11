@@ -27,7 +27,7 @@ const DEFAULT_DRAFT: AgentDraft = {
   level: "SPC",
   status: "idle",
   avatar: "",
-  thinkingModel: "google-antigravity/claude-opus-4-5-thinking",
+  thinkingModel: "kimi-coding/k2p5",
   systemPrompt: "",
   character: "",
   lore: "",
