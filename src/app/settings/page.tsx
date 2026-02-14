@@ -164,8 +164,8 @@ export default function SettingsPage() {
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
             <span className="text-sm text-zinc-200">
               Auto Dispatch
-              <WiringBadge state="not_wired" />
-              <WiringHint text="Saved in automation config, but no watcher/orchestrator path currently checks this flag." />
+              <WiringBadge state="live" />
+              <WiringHint text="task-dispatcher reads this flag and pauses queue claiming when disabled." />
             </span>
             <input
               type="checkbox"

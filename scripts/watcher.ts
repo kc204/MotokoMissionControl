@@ -55,6 +55,7 @@ function normalizeModelName(modelName?: string) {
   if (!modelName) return "";
   const trimmed = modelName.trim();
   if (trimmed === "anthropic/codex-cli") return "codex-cli";
+  if (trimmed === "k2p5" || trimmed === "kimi-coding/k2p5") return "kimi-coding/kimi-for-coding";
   return trimmed;
 }
 

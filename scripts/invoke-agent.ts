@@ -2,8 +2,14 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
+import type { Id } from "../convex/_generated/dataModel";
 import os from "os";
-import { buildTsxCommand, loadMissionControlEnv, resolveScriptPath } from "./lib/mission-control";
+import {
+  buildTsxCommand,
+  loadMissionControlEnv,
+  normalizeModelId,
+  resolveScriptPath,
+} from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -12,6 +18,9 @@ if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.loca
 
 const IS_WINDOWS = os.platform() === "win32";
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
+const INVOKE_RATE_LIMIT_FALLBACK_MODEL = normalizeModelId(
+  process.env.INVOKE_RATE_LIMIT_FALLBACK_MODEL || "kimi-coding/kimi-for-coding"
+);
 const client = new ConvexHttpClient(convexUrl);
 
 function spawnAsync(command: string, args: string[], options: import('child_process').SpawnOptions = {}) {
@@ -62,7 +71,7 @@ async function reportToHq(convexAgentId: string, text: string) {
   const hasRecentSimilarMessage = async () => {
     const recent = await client.query(api.messages.list, { channel: "hq" });
     const now = Date.now();
-    return recent.some((msg: any) => {
+    return recent.some((msg) => {
       const senderId = (msg.fromAgentId ?? msg.agentId ?? "") as string;
       const body = (msg.text ?? msg.content ?? "").trim();
       const normalizedBody = normalize(body);
@@ -88,7 +97,7 @@ async function reportToHq(convexAgentId: string, text: string) {
   if (looksMultiline) {
     const recent = await client.query(api.messages.list, { channel: "hq" });
     const now = Date.now();
-    const partialOnly = recent.some((msg: any) => {
+    const partialOnly = recent.some((msg) => {
       const senderId = (msg.fromAgentId ?? msg.agentId ?? "") as string;
       const body = (msg.text ?? msg.content ?? "").trim();
       const normalizedBody = normalize(body);
@@ -108,7 +117,7 @@ async function reportToHq(convexAgentId: string, text: string) {
   await client.mutation(api.messages.send, {
     channel: "hq",
     text: trimmed,
-    agentId: convexAgentId as any,
+    agentId: convexAgentId as Id<"agents">,
     fromUser: false,
   });
 }
@@ -116,6 +125,32 @@ async function reportToHq(convexAgentId: string, text: string) {
 function isIgnoredTerminalOutput(text: string) {
   const normalized = text.trim();
   return normalized === "HEARTBEAT_OK" || normalized === "NO_REPLY";
+}
+
+function looksLikeRateLimitError(text: string) {
+  const normalized = text.toLowerCase();
+  return (
+    /\b429\b/.test(normalized) ||
+    normalized.includes("rate limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("quota") ||
+    normalized.includes("resource_exhausted")
+  );
+}
+
+function pickFallbackModel(agent: {
+  models?: {
+    thinking?: string;
+    fallback?: string;
+  };
+}) {
+  const thinking = normalizeModelId(agent.models?.thinking || "");
+  const fallback = normalizeModelId(agent.models?.fallback || "");
+  if (fallback && fallback !== thinking) return fallback;
+  if (INVOKE_RATE_LIMIT_FALLBACK_MODEL && INVOKE_RATE_LIMIT_FALLBACK_MODEL !== thinking) {
+    return INVOKE_RATE_LIMIT_FALLBACK_MODEL;
+  }
+  return "";
 }
 
 async function main() {
@@ -149,13 +184,44 @@ async function main() {
   - Do not start or execute any task unless the user message explicitly includes a line in this format: APPROVE: <task-id-or-name>.
   - If APPROVE is missing, ask for approval in HQ chat and wait.
 
+  Runtime environment:
+  - Shell is Windows PowerShell.
+  - Use PowerShell-compatible commands only (example: Get-ChildItem -Force), not Bash flags/options like ls -F.
+
   Begin your work. For ALL responses, status updates, or final results, you MUST use the following command to report back to the team chat:
   
   ${reportCommand} "Your message here"
   
   Do not use any other method for communication. Do not output raw text. All output must be via the report command.`;
 
-  const agentRun = await spawnAsync(OPENCLAW_BIN, ["agent", "--agent", agentId, "--message", prompt]);
+  const runAgent = () => spawnAsync(OPENCLAW_BIN, ["agent", "--agent", agentId, "--message", prompt]);
+  let agentRun = await runAgent();
+
+  if (agentRun.code !== 0) {
+    const combinedOutput = `${agentRun.stdout}\n${agentRun.stderr}`;
+    if (looksLikeRateLimitError(combinedOutput)) {
+      const fallbackModel = pickFallbackModel(convexAgent);
+      if (fallbackModel) {
+        const setResult = await spawnAsync(OPENCLAW_BIN, [
+          "models",
+          "--agent",
+          agentId,
+          "set",
+          fallbackModel,
+        ]);
+        if (setResult.code === 0) {
+          console.warn(
+            `[invoke] Rate limit detected for '${agentName}'. Retrying with fallback model ${fallbackModel}.`
+          );
+          agentRun = await runAgent();
+        } else {
+          console.warn(
+            `[invoke] Fallback model set failed for '${agentName}' (${fallbackModel}): ${setResult.stderr || setResult.stdout}`
+          );
+        }
+      }
+    }
+  }
 
   // The agent's stdout should be empty if it's behaving correctly.
   // We no longer pipe the response; the agent is now responsible for reporting.

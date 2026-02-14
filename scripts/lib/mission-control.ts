@@ -39,6 +39,9 @@ export function normalizeModelId(modelId?: string | null) {
   const trimmed = modelId.trim();
   if (!trimmed) return "";
   if (trimmed === "anthropic/codex-cli") return "codex-cli";
+  if (trimmed === "k2p5" || trimmed === "kimi-coding/k2p5") {
+    return "kimi-coding/kimi-for-coding";
+  }
   return trimmed;
 }
 
@@ -54,7 +57,14 @@ export function resolveModelFromCatalog(
   if (suffixMatches.length === 0) return requested;
   if (requested !== "codex-cli") return suffixMatches[0];
 
-  const preferredOrder = ["openai/", "google-antigravity/", "google/", "anthropic/"];
+  const preferredOrder = [
+    "kimi-coding/",
+    "kimi-code/",
+    "openai/",
+    "google/",
+    "anthropic/",
+    "google-antigravity/",
+  ];
   for (const prefix of preferredOrder) {
     const match = suffixMatches.find((id) => id.startsWith(prefix));
     if (match) return match;
@@ -62,43 +72,118 @@ export function resolveModelFromCatalog(
   return suffixMatches[0];
 }
 
+function stripAnsi(value: string) {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function tryParseJson(value: string) {
+  try {
+    return { ok: true as const, value: JSON.parse(value) as unknown };
+  } catch {
+    return { ok: false as const, value: null };
+  }
+}
+
+function extractBalancedJsonBlock(text: string, start: number) {
+  const first = text[start];
+  if (first !== "{" && first !== "[") return null;
+
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+
+    if (ch === "}" || ch === "]") {
+      const expected = ch === "}" ? "{" : "[";
+      const top = stack[stack.length - 1];
+      if (top !== expected) return null;
+      stack.pop();
+      if (stack.length === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function isRunPayload(value: unknown) {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.runId === "string" ||
+    typeof row.status === "string" ||
+    (row.result !== undefined && typeof row.result === "object")
+  );
+}
+
 export function parseOpenClawJsonOutput<T>(stdout: string): T {
-  const raw = stdout.trim();
+  const raw = stripAnsi(stdout).trim();
   if (!raw) {
     throw new Error("Empty JSON output");
   }
 
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    const fencedMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fencedMatch?.[1]) {
-      try {
-        return JSON.parse(fencedMatch[1]) as T;
-      } catch {
-        // Fall through to loose extraction.
-      }
-    }
+  const direct = tryParseJson(raw);
+  if (direct.ok) return direct.value as T;
 
-    const objectStart = raw.indexOf("{");
-    const arrayStart = raw.indexOf("[");
-    const candidates = [objectStart, arrayStart].filter((index) => index >= 0);
-    if (candidates.length === 0) {
-      throw new Error("No JSON payload found in output");
-    }
-    const start = Math.min(...candidates);
-    const sliced = raw.slice(start);
-    try {
-      return JSON.parse(sliced) as T;
-    } catch {
-      const objectEnd = sliced.lastIndexOf("}");
-      const arrayEnd = sliced.lastIndexOf("]");
-      const ends = [objectEnd, arrayEnd].filter((index) => index >= 0);
-      if (ends.length === 0) {
-        throw new Error("No bounded JSON payload found in output");
-      }
-      const end = Math.max(...ends);
-      return JSON.parse(sliced.slice(0, end + 1)) as T;
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  let lastLineJson: unknown | null = null;
+  for (const line of lines) {
+    const parsed = tryParseJson(line);
+    if (parsed.ok) {
+      lastLineJson = parsed.value;
     }
   }
+  if (lastLineJson !== null) return lastLineJson as T;
+
+  const fencedMatches = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi)];
+  for (const match of fencedMatches) {
+    const inner = match[1]?.trim();
+    if (!inner) continue;
+    const parsed = tryParseJson(inner);
+    if (parsed.ok) return parsed.value as T;
+  }
+
+  let firstParsed: unknown | null = null;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (ch !== "{" && ch !== "[") continue;
+    const block = extractBalancedJsonBlock(raw, i);
+    if (!block) continue;
+    const parsed = tryParseJson(block);
+    if (!parsed.ok) continue;
+    if (isRunPayload(parsed.value)) return parsed.value as T;
+    if (firstParsed === null) firstParsed = parsed.value;
+  }
+  if (firstParsed !== null) {
+    return firstParsed as T;
+  }
+
+  throw new Error("No JSON payload found in output");
 }

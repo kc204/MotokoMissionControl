@@ -26,7 +26,7 @@ export default function AddAgentModal({
   const [systemPrompt, setSystemPrompt] = useState("");
   const [character, setCharacter] = useState("");
   const [lore, setLore] = useState("");
-  const [thinkingModel, setThinkingModel] = useState("kimi-coding/k2p5");
+  const [thinkingModel, setThinkingModel] = useState("kimi-coding/kimi-for-coding");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
   const modelOptions = useMemo(() => {

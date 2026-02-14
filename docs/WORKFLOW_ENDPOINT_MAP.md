@@ -30,7 +30,21 @@ This maps your intended flow (Jarvis-led, specialist execution, cross-agent coll
   - Updates Kanban status.
   - Sets `completedAt` when status is `done`.
   - Logs activity (`task_updated`).
-  - Notifies current assignees.
+- Notifies current assignees.
+
+## 3.5) Queue-Driven Execution
+
+- Kanban "Run / Resume" queues execution lanes and dispatcher drains them.
+- Endpoints:
+  - `tasks.enqueueDispatch`
+  - `tasks.claimNextDispatch`
+  - `tasks.completeDispatch`
+  - `tasks.failDispatch`
+  - `tasks.stopDispatch`
+- Behavior:
+  - Fans out a run across assignees (one lane per assignee when unscoped).
+  - Claims pending work for one runner process.
+  - Persists completion/failure and verification summaries.
 
 ## 4) Agent Collaboration (HQ + Task Threads)
 

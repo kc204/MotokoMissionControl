@@ -541,32 +541,80 @@ export const enqueueDispatch = mutation({
     }
 
     const normalizedKey = args.idempotencyKey?.trim() || undefined;
+    const dispatchPrompt = args.prompt?.trim() || undefined;
+    const requestedBy = args.requestedBy?.trim() || "Mission Control";
 
-    if (normalizedKey) {
-      const keyed = await ctx.db
-        .query("taskDispatches")
-        .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", normalizedKey))
-        .first();
-      if (keyed) return keyed._id;
+    const targetIds: Array<Id<"agents"> | undefined> = args.targetAgentId
+      ? [args.targetAgentId]
+      : task.assigneeIds.length > 0
+      ? [...task.assigneeIds]
+      : [undefined];
+    const dedupTargets: Array<Id<"agents"> | undefined> = [];
+    const seenTargets = new Set<string>();
+    for (const targetId of targetIds) {
+      const key = targetId ?? "__default";
+      if (seenTargets.has(key)) continue;
+      seenTargets.add(key);
+      dedupTargets.push(targetId);
     }
 
     const existing = await ctx.db
       .query("taskDispatches")
       .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
       .collect();
-    const active = existing.find((row) => row.status === "pending" || row.status === "running");
-    if (active) return active._id;
+
+    const activeByTarget = new Map<string, Id<"taskDispatches">>();
+    for (const row of existing) {
+      if (row.status !== "pending" && row.status !== "running") continue;
+      const key = row.targetAgentId ?? "__default";
+      activeByTarget.set(key, row._id);
+    }
 
     const now = Date.now();
-    const dispatchId = await ctx.db.insert("taskDispatches", {
-      taskId: args.taskId,
-      targetAgentId: args.targetAgentId,
-      requestedBy: args.requestedBy?.trim() || "Mission Control",
-      prompt: args.prompt?.trim() || undefined,
-      idempotencyKey: normalizedKey,
-      status: "pending",
-      requestedAt: now,
-    });
+    const createdIds: Array<Id<"taskDispatches">> = [];
+    const reusedIds: Array<Id<"taskDispatches">> = [];
+
+    for (const targetId of dedupTargets) {
+      const targetKey = targetId ?? "__default";
+      const activeId = activeByTarget.get(targetKey);
+      if (activeId) {
+        reusedIds.push(activeId);
+        continue;
+      }
+
+      const perTargetIdempotencyKey = normalizedKey
+        ? `${normalizedKey}:${targetId ?? "default"}`
+        : undefined;
+      if (perTargetIdempotencyKey) {
+        const keyed = await ctx.db
+          .query("taskDispatches")
+          .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", perTargetIdempotencyKey))
+          .first();
+        if (keyed) {
+          reusedIds.push(keyed._id);
+          continue;
+        }
+      }
+
+      const dispatchId = await ctx.db.insert("taskDispatches", {
+        taskId: args.taskId,
+        targetAgentId: targetId,
+        requestedBy,
+        prompt: dispatchPrompt,
+        idempotencyKey: perTargetIdempotencyKey,
+        status: "pending",
+        requestedAt: now,
+      });
+      createdIds.push(dispatchId);
+    }
+
+    const firstQueuedId = createdIds[0] ?? reusedIds[0];
+    if (!firstQueuedId) {
+      throw new Error("No dispatch lane was queued");
+    }
+    if (createdIds.length === 0) {
+      return firstQueuedId;
+    }
 
     await ctx.db.patch(args.taskId, {
       status: "in_progress",
@@ -574,7 +622,7 @@ export const enqueueDispatch = mutation({
       completedAt: undefined,
     });
 
-    const trimmedPrompt = args.prompt?.trim() || "";
+    const trimmedPrompt = dispatchPrompt || "";
     if (trimmedPrompt) {
       await ctx.db.insert("messages", {
         taskId: args.taskId,
@@ -591,11 +639,14 @@ export const enqueueDispatch = mutation({
       type: "dispatch_started",
       taskId: args.taskId,
       projectId: task.projectId,
-      message: `Dispatch queued for "${task.title}"`,
+      message:
+        dedupTargets.length > 1
+          ? `Dispatch queued for "${task.title}" (${createdIds.length}/${dedupTargets.length} lanes queued)`
+          : `Dispatch queued for "${task.title}"`,
       createdAt: now,
     });
 
-    return dispatchId;
+    return firstQueuedId;
   },
 });
 
@@ -665,6 +716,13 @@ export const claimNextDispatch = mutation({
         continue;
       }
 
+      const assigneeAgentNames = (
+        await Promise.all(task.assigneeIds.map(async (assigneeId) => await ctx.db.get(assigneeId)))
+      )
+        .map((agent) => agent?.name)
+        .filter((name): name is string => Boolean(name));
+      const collaboratorNames = assigneeAgentNames.filter((name) => name !== targetAgent.name);
+
       const thread = await ctx.db
         .query("messages")
         .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
@@ -695,6 +753,8 @@ export const claimNextDispatch = mutation({
         targetAgentSystemPrompt: targetAgent.systemPrompt ?? "",
         targetAgentCharacter: targetAgent.character ?? "",
         targetAgentLore: targetAgent.lore ?? "",
+        assigneeAgentNames,
+        collaboratorNames,
         prompt: next.prompt ?? "",
         threadMessages: threadSorted,
       };
@@ -757,6 +817,41 @@ export const completeDispatch = mutation({
       finishedAt: now,
       error: undefined,
     });
+
+    const taskDispatches = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
+      .collect();
+    const remainingActiveLanes = taskDispatches.filter(
+      (row) => row.status === "pending" || row.status === "running"
+    ).length;
+
+    if (remainingActiveLanes > 0) {
+      if (task.status !== "archived") {
+        await ctx.db.patch(task._id, {
+          status: "in_progress",
+          updatedAt: now,
+          openclawRunId: args.runId ?? task.openclawRunId,
+        });
+      } else {
+        await ctx.db.patch(task._id, {
+          updatedAt: now,
+          openclawRunId: args.runId ?? task.openclawRunId,
+        });
+      }
+
+      await ctx.db.insert("activities", {
+        type: "dispatch_completed",
+        taskId: task._id,
+        projectId: task.projectId,
+        message: `Dispatch lane completed for "${task.title}" (${remainingActiveLanes} lane(s) still active)`,
+        createdAt: now,
+      });
+      return {
+        ok: true,
+        remainingActiveLanes,
+      };
+    }
 
     let nextTaskStatus: "testing" | "review" | "blocked" = "testing";
     if (verificationStatus === "fail") {
@@ -834,6 +929,47 @@ export const failDispatch = mutation({
       finishedAt: now,
       error,
     });
+
+    const taskDispatches = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
+      .collect();
+    const remainingActiveLanes = taskDispatches.filter(
+      (row) => row.status === "pending" || row.status === "running"
+    ).length;
+
+    if (remainingActiveLanes > 0) {
+      if (task.status !== "archived") {
+        await ctx.db.patch(task._id, {
+          status: "in_progress",
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.patch(task._id, { updatedAt: now });
+      }
+
+      await ctx.db.insert("activities", {
+        type: "dispatch_completed",
+        taskId: task._id,
+        projectId: task.projectId,
+        message: `Dispatch lane failed for "${task.title}" (${remainingActiveLanes} lane(s) still active)`,
+        createdAt: now,
+      });
+
+      for (const assigneeId of task.assigneeIds) {
+        await ctx.db.insert("notifications", {
+          targetAgentId: assigneeId,
+          content: `One dispatch lane failed for "${task.title}": ${error}`,
+          sourceTaskId: task._id,
+          delivered: false,
+          createdAt: now,
+        });
+      }
+      return {
+        ok: true,
+        remainingActiveLanes,
+      };
+    }
 
     if (task.status !== "archived") {
       await ctx.db.patch(task._id, {

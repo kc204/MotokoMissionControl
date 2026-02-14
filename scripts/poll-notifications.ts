@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import os from "os";
-import { loadMissionControlEnv } from "./lib/mission-control";
+import { loadMissionControlEnv, parseOpenClawJsonOutput } from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -17,6 +17,18 @@ const OPENCLAW_BIN =
 const POLL_INTERVAL_MS = Number(process.env.NOTIFICATION_POLL_MS || 2000);
 const DEFAULT_BATCH_SIZE = Number(process.env.NOTIFICATION_BATCH_SIZE || 10);
 const AUTOMATION_REFRESH_MS = Number(process.env.AUTOMATION_REFRESH_MS || 5000);
+const OPENCLAW_TIMEOUT_MS = Math.max(
+  10000,
+  Number(process.env.NOTIFICATION_OPENCLAW_TIMEOUT_MS || 45000)
+);
+const SESSION_LOCK_BACKOFF_BASE_MS = Math.max(
+  2000,
+  Number(process.env.NOTIFICATION_SESSION_LOCK_BACKOFF_BASE_MS || 15000)
+);
+const SESSION_LOCK_BACKOFF_MAX_MS = Math.max(
+  SESSION_LOCK_BACKOFF_BASE_MS,
+  Number(process.env.NOTIFICATION_SESSION_LOCK_BACKOFF_MAX_MS || 180000)
+);
 const RUN_ONCE = process.env.RUN_ONCE === "1";
 
 const client = new ConvexHttpClient(convexUrl);
@@ -24,6 +36,18 @@ let lastAutomationRefreshAt = 0;
 let notificationDeliveryEnabled = true;
 let notificationBatchSize = Math.max(1, DEFAULT_BATCH_SIZE);
 let lastDeliveryDisabledLogAt = 0;
+const sessionRetryAt = new Map<string, number>();
+const sessionLockFailures = new Map<string, number>();
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function truncate(value: string, max = 240) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(0, max - 3))}...`;
+}
 
 function spawnOpenClaw(args: string[]) {
   if (IS_WINDOWS) {
@@ -38,42 +62,25 @@ function spawnOpenClaw(args: string[]) {
   });
 }
 
-async function sendToOpenClaw(
-  sessionKey: string,
-  message: string,
-  sessionMap: Map<string, string>
-): Promise<void> {
-  const sessionId = sessionMap.get(sessionKey) ?? null;
-  const agentId = resolveAgentId(sessionKey);
-
-  const args = sessionId
-    ? ["agent", "--session-id", sessionId, "--message", message, "--json"]
-    : ["agent", "--agent", agentId, "--message", message, "--json"];
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawnOpenClaw(args);
-
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(stderr || `openclaw exited with code ${code}; args=${args.join(" ")}`));
-    });
-  });
-}
-
-async function runOpenClawJson<T>(args: string[]): Promise<T> {
-  return await new Promise<T>((resolve, reject) => {
+async function runOpenClaw(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
     const child = spawnOpenClaw(args);
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      if (IS_WINDOWS && child.pid) {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore",
+          shell: false,
+        });
+        killer.on("error", () => child.kill());
+      } else {
+        child.kill("SIGKILL");
+      }
+    }, OPENCLAW_TIMEOUT_MS);
+
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
@@ -82,17 +89,106 @@ async function runOpenClawJson<T>(args: string[]): Promise<T> {
     });
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr || `openclaw exited with code ${code}`));
+      clearTimeout(timeout);
+      if (timedOut) {
+        reject(
+          new Error(
+            `openclaw timeout after ${OPENCLAW_TIMEOUT_MS}ms; args=${args.join(
+              " "
+            )}; stderr=${truncate(stderr)}`
+          )
+        );
         return;
       }
-      try {
-        resolve(JSON.parse(stdout) as T);
-      } catch {
-        reject(new Error(`Failed to parse JSON from openclaw: ${stdout || stderr}`));
+      if (code !== 0) {
+        reject(new Error(stderr || stdout || `openclaw exited with code ${code}`));
+        return;
       }
+      resolve({ stdout, stderr });
     });
   });
+}
+
+function isTransientOpenClawError(message: string) {
+  const text = message.toLowerCase();
+  return (
+    text.includes("session file locked") ||
+    text.includes(".jsonl.lock") ||
+    text.includes("lane wait exceeded") ||
+    text.includes("failovererror") ||
+    text.includes("gateway timeout") ||
+    text.includes("timeout 10000ms") ||
+    text.includes("temporarily unavailable")
+  );
+}
+
+function setSessionBackoff(sessionKey: string) {
+  const failures = (sessionLockFailures.get(sessionKey) ?? 0) + 1;
+  sessionLockFailures.set(sessionKey, failures);
+  const backoff = Math.min(SESSION_LOCK_BACKOFF_BASE_MS * failures, SESSION_LOCK_BACKOFF_MAX_MS);
+  const jitter = Math.floor(Math.random() * 1000);
+  const retryAt = Date.now() + backoff + jitter;
+  sessionRetryAt.set(sessionKey, retryAt);
+  return { failures, retryAt, backoff: backoff + jitter };
+}
+
+function clearSessionBackoff(sessionKey: string) {
+  sessionLockFailures.delete(sessionKey);
+  sessionRetryAt.delete(sessionKey);
+}
+
+async function sendToOpenClaw(
+  sessionKey: string,
+  message: string,
+  sessionMap: Map<string, string>
+): Promise<void> {
+  const sessionId = sessionMap.get(sessionKey) ?? null;
+  const agentId = resolveAgentId(sessionKey);
+
+  const attempts = sessionId
+    ? [
+        ["agent", "--session-id", sessionId, "--message", message, "--json"],
+        ["agent", "--agent", agentId, "--message", message, "--json"],
+      ]
+    : [["agent", "--agent", agentId, "--message", message, "--json"]];
+
+  let lastError: Error | null = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const args = attempts[i];
+    try {
+      await runOpenClawJson(args);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      const canRetry = i + 1 < attempts.length && isTransientOpenClawError(message);
+      if (!canRetry) {
+        break;
+      }
+      await sleep(800);
+    }
+  }
+
+  throw lastError ?? new Error("Unknown OpenClaw notification delivery error");
+}
+
+async function runOpenClawJson<T>(args: string[]): Promise<T> {
+  const { stdout, stderr } = await runOpenClaw(args);
+  const candidates = [stdout, stderr, `${stdout}\n${stderr}`];
+  for (const candidate of candidates) {
+    const text = candidate.trim();
+    if (!text) continue;
+    try {
+      return parseOpenClawJsonOutput<T>(text);
+    } catch {
+      // Try next candidate.
+    }
+  }
+  throw new Error(
+    `Failed to parse JSON from openclaw args=${args.join(" ")} stdout=${truncate(
+      stdout
+    )} stderr=${truncate(stderr)}`
+  );
 }
 
 async function getSessionMap(): Promise<Map<string, string>> {
@@ -161,6 +257,7 @@ async function runOnce() {
   );
   if (undelivered.length === 0) return;
 
+  const processedSessions = new Set<string>();
   for (const notification of undelivered) {
     const agent = await client.query(api.agents.get, { id: notification.targetAgentId });
     if (!agent) {
@@ -171,21 +268,38 @@ async function runOnce() {
       continue;
     }
 
+    const sessionKey = agent.sessionKey;
+    if (processedSessions.has(sessionKey)) continue;
+    const retryAt = sessionRetryAt.get(sessionKey) ?? 0;
+    if (retryAt > now) continue;
+
+    processedSessions.add(sessionKey);
     try {
       const deliveryMessage = trimDeliveryMessage(notification.content);
-      await sendToOpenClaw(agent.sessionKey, deliveryMessage, sessionMap);
+      await sendToOpenClaw(sessionKey, deliveryMessage, sessionMap);
+      clearSessionBackoff(sessionKey);
       await client.mutation(api.notifications.markDelivered, { id: notification._id });
       console.log(
-        `[delivered] ${agent.name} (${agent.sessionKey}) <- ${deliveryMessage.slice(0, 80)}`
+        `[delivered] ${agent.name} (${sessionKey}) <- ${deliveryMessage.slice(0, 80)}`
       );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      if (isTransientOpenClawError(errorMessage)) {
+        const backoff = setSessionBackoff(sessionKey);
+        console.warn(
+          `[backoff] ${agent.name} (${sessionKey}) transient lock; retry in ${Math.ceil(
+            backoff.backoff / 1000
+          )}s: ${truncate(errorMessage, 200)}`
+        );
+        continue;
+      }
       await client.mutation(api.notifications.markAttemptFailed, {
         id: notification._id,
         error: errorMessage,
       });
+      clearSessionBackoff(sessionKey);
       console.error(
-        `[retry] ${agent.name} (${agent.sessionKey}) delivery failed: ${errorMessage}`
+        `[retry] ${agent.name} (${sessionKey}) delivery failed: ${errorMessage}`
       );
     }
   }

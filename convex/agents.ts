@@ -18,6 +18,9 @@ function normalizeModelName(modelName?: string) {
   if (!modelName) return modelName;
   const trimmed = modelName.trim();
   if (trimmed === "anthropic/codex-cli") return "codex-cli";
+  if (trimmed === "k2p5" || trimmed === "kimi-coding/k2p5") {
+    return "kimi-coding/kimi-for-coding";
+  }
   return trimmed;
 }
 
@@ -36,10 +39,13 @@ function parseAvailableModelIds(value: unknown) {
 }
 
 function isModelIdInCatalog(modelId: string, catalog: Set<string>) {
-  if (!modelId || catalog.size === 0) return true;
-  if (catalog.has(modelId)) return true;
+  const normalized = normalizeModelName(modelId) ?? modelId;
+  if (!normalized || catalog.size === 0) return true;
+  if (catalog.has(normalized)) return true;
   for (const id of catalog) {
-    if (id.endsWith(`/${modelId}`)) return true;
+    const catalogId = normalizeModelName(id) ?? id;
+    if (catalogId === normalized) return true;
+    if (catalogId.endsWith(`/${normalized}`)) return true;
   }
   return false;
 }
@@ -176,14 +182,14 @@ export const createAgent = mutation({
       models: {
         thinking:
           normalizeModelName(args.thinkingModel) ??
-          "kimi-coding/k2p5",
+          "kimi-coding/kimi-for-coding",
         execution: normalizeModelName(args.executionModel),
         heartbeat:
           normalizeModelName(args.heartbeatModel) ??
           "google/gemini-2.5-flash",
         fallback:
           normalizeModelName(args.fallbackModel) ??
-          "google/gemini-2.5-flash",
+          "kimi-coding/kimi-for-coding",
       },
       createdAt: now,
       updatedAt: now,

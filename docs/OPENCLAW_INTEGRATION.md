@@ -8,6 +8,7 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 - Convex is the system of record.
 - `scripts/watcher.ts` polls Convex and keeps OpenClaw in sync.
 - `scripts/orchestrator.ts` routes new HQ user messages to the right specialist.
+- `scripts/task-dispatcher.ts` drains queued Kanban task dispatches and runs specialist lanes.
 - Dispatch uses `openclaw agent --agent <id> --message "<prompt>" --json`.
 
 2. OpenClaw -> Mission Control (Event Webhook + Reporter)
@@ -52,7 +53,13 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 - Routes by mention/keywords to specialist.
 - Runs real OpenClaw turn for target specialist.
 
-3. `scripts/heartbeat-orchestrator.ts`
+3. `scripts/task-dispatcher.ts`
+- Claims queued task lanes from `tasks.claimNextDispatch`.
+- Uses configurable worker concurrency (`DISPATCH_CONCURRENCY`, default `2`).
+- Executes `openclaw agent --agent <id> --message ... --json`.
+- Marks dispatch lane complete/fail and writes probe settings for operations dashboard.
+
+4. `scripts/heartbeat-orchestrator.ts`
 - Entry: `--agent <openclaw-agent-id>`.
 - Pulls:
   - `notifications.getForAgent`
@@ -61,15 +68,15 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 - Builds heartbeat prompt and runs one specialist turn.
 - Marks consumed notifications delivered.
 
-4. `scripts/poll-notifications.ts`
+5. `scripts/poll-notifications.ts`
 - Delivery bridge loop.
 - Supports session-aware delivery and fallback agent-targeted delivery.
 - Retries + stores attempt/error metadata.
 
-5. `scripts/openclaw-sync-agents.ts`
+6. `scripts/openclaw-sync-agents.ts`
 - Creates missing OpenClaw agent profiles from Convex `agents` roster.
 
-6. `scripts/setup-heartbeat-crons.ts`
+7. `scripts/setup-heartbeat-crons.ts`
 - Creates/updates staggered 15-minute cron jobs:
   - `main`: `*/15`
   - `developer`: `2-59/15`
@@ -77,12 +84,12 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
   - `researcher`: `8-59/15`
   - `monitor`: `12-59/15`
 
-7. `hooks/mission-control/handler.ts`
+8. `hooks/mission-control/handler.ts`
 - User-installed OpenClaw hook.
 - Registers `onAgentEvent` listener on gateway startup.
 - Sends lifecycle/progress events to Mission Control webhook.
 
-8. `scripts/install-openclaw-hook.ts`
+9. `scripts/install-openclaw-hook.ts`
 - Installs hook files into `~/.openclaw/hooks/mission-control`.
 
 ## Runbook
@@ -103,6 +110,7 @@ This document defines how Mission Control (Convex + Next.js) integrates with loc
 
 5. Start daemons:
 - `npm run daemon:watcher`
+- `npm run daemon:dispatch`
 - `npm run daemon:notifications`
 
 6. Install/update heartbeat crons:

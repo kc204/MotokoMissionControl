@@ -1,8 +1,15 @@
 import { spawn } from "child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
+import { existsSync } from "fs";
 import os from "os";
-import { buildTsxCommand, loadMissionControlEnv } from "./lib/mission-control";
+import path from "path";
+import {
+  buildTsxCommand,
+  loadMissionControlEnv,
+  resolveMissionControlRoot,
+  resolveScriptPath,
+} from "./lib/mission-control";
 
 loadMissionControlEnv();
 
@@ -10,9 +17,13 @@ const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!convexUrl) throw new Error("NEXT_PUBLIC_CONVEX_URL is required in .env.local");
 
 const IS_WINDOWS = os.platform() === "win32";
-const OPENCLAW_BIN = process.env.OPENCLAW_BIN || (IS_WINDOWS ? "openclaw.cmd" : "openclaw");
 const client = new ConvexHttpClient(convexUrl);
 const reportScriptCommand = buildTsxCommand("report.ts");
+const TSX_CLI_PATH = path.join(resolveMissionControlRoot(), "node_modules", "tsx", "dist", "cli.mjs");
+const HEARTBEAT_AGENT_TIMEOUT_MS = Math.max(
+  10000,
+  Number(process.env.HEARTBEAT_AGENT_TIMEOUT_MS || 120000)
+);
 const HEARTBEAT_NOTIFICATION_MAX_AGE_MS = Math.max(
   0,
   Number(process.env.HEARTBEAT_NOTIFICATION_MAX_AGE_MS || 6 * 60 * 60 * 1000)
@@ -26,14 +37,10 @@ const DEFAULT_HEARTBEAT_CONFIG = {
   heartbeatRequireChatUpdate: false,
 };
 
-function spawnOpenClaw(args: string[]) {
-  if (IS_WINDOWS) {
-    return spawn("cmd.exe", ["/d", "/s", "/c", OPENCLAW_BIN, ...args], {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-    });
-  }
-  return spawn(OPENCLAW_BIN, args, { stdio: ["ignore", "pipe", "pipe"], shell: false });
+function truncate(value: string, max = 280) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(0, max - 3))}...`;
 }
 
 function parseArgs() {
@@ -89,20 +96,64 @@ async function getHeartbeatConfig() {
 }
 
 async function runOpenClawAgent(agentId: string, prompt: string): Promise<void> {
-  const command = buildTsxCommand("invoke-agent.ts", ["--agent", agentId, "--message", prompt]);
-  
+  const invokeScriptPath = resolveScriptPath("invoke-agent.ts");
+  if (!existsSync(TSX_CLI_PATH)) {
+    throw new Error(`tsx cli not found at ${TSX_CLI_PATH}`);
+  }
+
   await new Promise<void>((resolve, reject) => {
-    // On Windows, execute the full command string via cmd.exe to handle paths with spaces.
-    const child = IS_WINDOWS
-      ? spawn(command, { stdio: "inherit", shell: true })
-      : spawn(command, { stdio: "inherit", shell: true });
-    
+    const child = spawn(process.execPath, [TSX_CLI_PATH, invokeScriptPath, "--agent", agentId, "--message", prompt], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      if (IS_WINDOWS && child.pid) {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore",
+          shell: false,
+        });
+        killer.on("error", () => {
+          child.kill();
+        });
+      } else {
+        child.kill("SIGKILL");
+      }
+    }, HEARTBEAT_AGENT_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        reject(
+          new Error(
+            `invoke-agent.ts timed out after ${HEARTBEAT_AGENT_TIMEOUT_MS}ms; stdout="${truncate(
+              stdout
+            )}" stderr="${truncate(stderr)}"`
+          )
+        );
+        return;
+      }
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`invoke-agent.ts exited with code ${code}`));
+        reject(
+          new Error(
+            `invoke-agent.ts exited with code ${code}; stdout="${truncate(stdout)}" stderr="${truncate(
+              stderr
+            )}"`
+          )
+        );
       }
     });
   });
@@ -177,6 +228,8 @@ async function main() {
       : `(3) if you completed meaningful work, post a chat update; otherwise, do not post a chat update;`,
     `if needed update tasks via Convex CLI;`,
     `(4) finish with ${reportScriptCommand} heartbeat ${convexAgent.name} idle "Heartbeat complete".`,
+    "Execution environment is Windows PowerShell.",
+    "Use PowerShell-compatible commands only (example: Get-ChildItem -Force), not Bash flags like ls -F.",
     "Do not output NO_REPLY. If blocked, state blocker and owner. If report command fails, include full error and retry once.",
   ].join(" ");
 

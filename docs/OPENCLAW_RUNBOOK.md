@@ -9,7 +9,8 @@ Run these in separate terminals:
 1. `npx convex dev`
 2. `npm run dev`
 3. `npm run daemon:watcher`
-4. `npm run daemon:notifications`
+4. `npm run daemon:dispatch`
+5. `npm run daemon:notifications`
 
 ## 1) Verify OpenClaw is healthy
 
@@ -59,7 +60,23 @@ Run:
 
 - `npm run daemon:notifications`
 
-## 4) How to test end-to-end quickly
+## 4) Task dispatch bridge (Kanban queue -> OpenClaw lanes)
+
+`scripts/task-dispatcher.ts` drains queued Kanban dispatch rows.
+
+It:
+
+- Polls `tasks.claimNextDispatch`.
+- Claims lanes with configurable worker concurrency.
+- Builds lane prompts using task details + thread context.
+- Runs `openclaw agent --agent <id> --message ... --json`.
+- Marks dispatches complete or failed via Convex mutations.
+
+Run:
+
+- `npm run daemon:dispatch`
+
+## 5) How to test end-to-end quickly
 
 1. In HQ chat, send: `@Forge ping from mission control`
 2. Confirm a notification row appears in Convex dashboard.
@@ -69,7 +86,7 @@ Run:
 5. Confirm corresponding agent session got the message:
    - `openclaw sessions --json`
 
-## 5) Thread subscription behavior
+## 6) Thread subscription behavior
 
 Task-thread messages now do this automatically:
 
@@ -84,18 +101,19 @@ This behavior is implemented in:
 - `convex/tasks.ts`
 - `convex/taskSubscriptions.ts`
 
-## 6) Heartbeats (every 15 minutes)
+## 7) Heartbeats (every 15 minutes)
 
 Install/update staggered heartbeat crons:
 
 - `npm run openclaw:setup-heartbeats`
 
-## 7) Known constraints in current repo
+## 8) Known constraints in current repo
 
-- `scripts/watcher.ts` updates model/auth settings and invokes orchestrator; keep it running.
+- `scripts/watcher.ts` updates model/auth settings and invokes HQ orchestrator; keep it running.
+- `scripts/task-dispatcher.ts` must be running for Kanban "Run / Resume Task" queue execution.
 - Real Telegram -> Jarvis ingestion is outside this repo and must be configured in OpenClaw channel routing.
 
-## 8) Environment variables
+## 9) Environment variables
 
 Required:
 
@@ -107,6 +125,16 @@ Recommended:
 - `OPENCLAW_WORKSPACE_ROOT=<path>`
 - `NOTIFICATION_POLL_MS=2000`
 - `NOTIFICATION_BATCH_SIZE=50`
+- `NOTIFICATION_OPENCLAW_TIMEOUT_MS=45000`
+- `NOTIFICATION_SESSION_LOCK_BACKOFF_BASE_MS=15000`
+- `NOTIFICATION_SESSION_LOCK_BACKOFF_MAX_MS=180000`
+- `DISPATCH_CONCURRENCY=2`
+- `DISPATCH_MESSAGE_MAX_CHARS=3500` (Windows-safe default)
+- `DISPATCH_DESCRIPTION_MAX_CHARS=1800`
+- `DISPATCH_NOTE_MAX_CHARS=1200`
+- `DISPATCH_RATE_LIMIT_COOLDOWN_MS=600000` (provider cooldown after 429/rate-limit)
+- `DISPATCH_RATE_LIMIT_FALLBACK_MODELS=kimi-coding/kimi-for-coding` (comma-separated)
+- `HEARTBEAT_AGENT_TIMEOUT_MS=120000`
 
 Optional (for local simulation only):
 

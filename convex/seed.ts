@@ -8,9 +8,9 @@ const canonicalAgents = [
     status: "active" as const,
     avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Motoko",
     models: {
-      thinking: "kimi-coding/k2p5",
+      thinking: "kimi-coding/kimi-for-coding",
       heartbeat: "google/gemini-2.5-flash",
-      fallback: "google/gemini-2.5-flash",
+      fallback: "kimi-coding/kimi-for-coding",
     },
     sessionKey: "agent:motoko:main",
   },
@@ -24,7 +24,7 @@ const canonicalAgents = [
       thinking: "openai-codex/gpt-5.2",
       execution: "openai-codex/gpt-5.2",
       heartbeat: "google/gemini-2.5-flash",
-      fallback: "google/gemini-2.5-flash",
+      fallback: "kimi-coding/kimi-for-coding",
     },
     sessionKey: "agent:developer:main",
   },
@@ -37,7 +37,7 @@ const canonicalAgents = [
     models: {
       thinking: "google/gemini-2.5-pro",
       heartbeat: "google/gemini-2.5-flash",
-      fallback: "google/gemini-2.5-flash",
+      fallback: "kimi-coding/kimi-for-coding",
     },
     sessionKey: "agent:writer:main",
   },
@@ -50,7 +50,7 @@ const canonicalAgents = [
     models: {
       thinking: "google/gemini-2.5-flash",
       heartbeat: "google/gemini-2.5-flash",
-      fallback: "google/gemini-2.5-flash",
+      fallback: "kimi-coding/kimi-for-coding",
     },
     sessionKey: "agent:researcher:main",
   },
@@ -63,7 +63,7 @@ const canonicalAgents = [
     models: {
       thinking: "google/gemini-2.5-flash",
       heartbeat: "google/gemini-2.5-flash",
-      fallback: "google/gemini-2.5-flash",
+      fallback: "kimi-coding/kimi-for-coding",
     },
     sessionKey: "agent:monitor:main",
   },

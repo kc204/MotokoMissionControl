@@ -27,7 +27,7 @@ const DEFAULT_DRAFT: AgentDraft = {
   level: "SPC",
   status: "idle",
   avatar: "",
-  thinkingModel: "kimi-coding/k2p5",
+  thinkingModel: "kimi-coding/kimi-for-coding",
   systemPrompt: "",
   character: "",
   lore: "",
