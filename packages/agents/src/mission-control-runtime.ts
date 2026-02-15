@@ -10,9 +10,33 @@ interface AutomationConfig {
   heartbeatEnabled: boolean;
 }
 
+interface RuntimeAgentRow {
+  _id: string;
+  name: string;
+  sessionKey: string;
+  level?: "LEAD" | "INT" | "SPC";
+  status: "idle" | "active" | "blocked" | "offline";
+}
+
+interface RuntimeSettingRow {
+  value?: unknown;
+}
+
+interface RuntimeHqMessageRow {
+  _id: string;
+  content?: string;
+  fromUser?: boolean;
+  fromAgentId?: string;
+  mentions?: string[];
+}
+
 const WATCHER_LEASE_KEY = "watcher:leader";
+const HQ_MANUAL_DISPATCH_KEY = "orchestrator:manual_dispatch";
+const HQ_LAST_MESSAGE_KEY = "orchestrator:last_hq_message_id";
+const HQ_LAST_MANUAL_TOKEN_KEY = "orchestrator:last_manual_dispatch";
 const LEASE_TTL_MS = 15_000;
 const CONFIG_REFRESH_MS = 5_000;
+const AGENT_CACHE_MS = 5_000;
 
 const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
   autoDispatchEnabled: true,
@@ -34,6 +58,11 @@ export class MissionControlRuntime {
   private lastLeaseRenewedAt = 0;
   private leaseOwned = false;
   private lastLeaseWarningAt = 0;
+  private hqInFlight = false;
+  private cachedAgents: RuntimeAgentRow[] = [];
+  private agentsFetchedAt = 0;
+  private lastKnownHqMessageId: string | null = null;
+  private lastKnownManualDispatchToken: string | null = null;
 
   constructor(config: RuntimeConfig) {
     this.config = {
@@ -115,6 +144,10 @@ export class MissionControlRuntime {
         this.activeNotifications.size < notificationConcurrency
       ) {
         await this.processNextNotification();
+      }
+
+      if (automation.autoDispatchEnabled) {
+        await this.processHqChannel();
       }
     } catch (error) {
       console.error("[MissionControlRuntime] Tick failed:", error);
@@ -279,6 +312,187 @@ export class MissionControlRuntime {
       });
     } catch (error) {
       console.error("[MissionControlRuntime] Error claiming notification:", error);
+    }
+  }
+
+  private parseMentions(content: string): string[] {
+    const matches = content.match(/@([a-zA-Z0-9_]+)/g) ?? [];
+    return Array.from(new Set(matches.map((item) => item.toLowerCase())));
+  }
+
+  private async getAgents(force = false): Promise<RuntimeAgentRow[]> {
+    const now = Date.now();
+    if (!force && now - this.agentsFetchedAt < AGENT_CACHE_MS) {
+      return this.cachedAgents;
+    }
+    const agents = (await this.client.query(api.agents.list, {})) as RuntimeAgentRow[];
+    this.cachedAgents = agents;
+    this.agentsFetchedAt = now;
+    return agents;
+  }
+
+  private resolveHqTargets(message: RuntimeHqMessageRow, agents: RuntimeAgentRow[]): RuntimeAgentRow[] {
+    const content = (message.content ?? "").trim();
+    const mentionSet = new Set<string>([
+      ...(Array.isArray(message.mentions) ? message.mentions.map((m) => String(m).toLowerCase()) : []),
+      ...this.parseMentions(content),
+    ]);
+
+    const available = agents.filter((agent) => agent.status !== "offline");
+    if (available.length === 0) return [];
+
+    if (mentionSet.has("@all")) {
+      return available.filter((agent) => agent.status !== "blocked");
+    }
+
+    const byName = new Map(available.map((agent) => [agent.name.toLowerCase(), agent]));
+    const explicitTargets = Array.from(mentionSet)
+      .filter((mention) => mention.startsWith("@"))
+      .map((mention) => byName.get(mention.slice(1)))
+      .filter((agent): agent is RuntimeAgentRow => Boolean(agent))
+      .filter((agent) => agent.status !== "blocked");
+
+    if (explicitTargets.length > 0) {
+      const deduped = new Map(explicitTargets.map((agent) => [agent._id, agent]));
+      return Array.from(deduped.values());
+    }
+
+    const lead =
+      available.find((agent) => agent.level === "LEAD" && agent.status !== "blocked") ??
+      available.find((agent) => agent.name.toLowerCase() === "motoko" && agent.status !== "blocked") ??
+      available.find((agent) => agent.status === "active") ??
+      available.find((agent) => agent.status === "idle");
+
+    return lead ? [lead] : [];
+  }
+
+  private buildHqPrompt(content: string): string {
+    return [
+      "You are responding in Mission Control HQ chat.",
+      "",
+      "User message:",
+      content || "(empty message)",
+      "",
+      "Respond as this agent in 2-6 concise sentences with actionable detail.",
+      "If you need input from another specialist, explicitly @mention them.",
+    ].join("\n");
+  }
+
+  private async setAgentStatus(agentId: string, status: "idle" | "active"): Promise<void> {
+    try {
+      await this.client.mutation(api.agents.update, {
+        id: agentId as any,
+        status,
+      });
+    } catch (error) {
+      console.warn(`[MissionControlRuntime] Failed to set agent status ${agentId} -> ${status}:`, error);
+    }
+  }
+
+  private async rememberHqCursor(messageId: string, manualDispatchToken: string | null): Promise<void> {
+    this.lastKnownHqMessageId = messageId;
+    if (manualDispatchToken !== null) {
+      this.lastKnownManualDispatchToken = manualDispatchToken;
+    }
+
+    const writes: Array<Promise<unknown>> = [
+      this.client.mutation(api.settings.set, {
+        key: HQ_LAST_MESSAGE_KEY,
+        value: messageId,
+      }),
+    ];
+
+    if (manualDispatchToken !== null) {
+      writes.push(
+        this.client.mutation(api.settings.set, {
+          key: HQ_LAST_MANUAL_TOKEN_KEY,
+          value: manualDispatchToken,
+        })
+      );
+    }
+
+    await Promise.all(writes);
+  }
+
+  private async processHqChannel(): Promise<void> {
+    if (!this.isRunning || !this.leaseOwned || this.hqInFlight) return;
+    this.hqInFlight = true;
+
+    try {
+      const [latestUserMessage, manualDispatchRow, lastMessageRow, lastManualRow] = await Promise.all([
+        this.client.query(api.messages.latestUserForChannel, {
+          channel: "hq",
+          scanLimit: 120,
+        }) as Promise<RuntimeHqMessageRow | null>,
+        this.client.query(api.settings.get, { key: HQ_MANUAL_DISPATCH_KEY }) as Promise<RuntimeSettingRow | null>,
+        this.client.query(api.settings.get, { key: HQ_LAST_MESSAGE_KEY }) as Promise<RuntimeSettingRow | null>,
+        this.client.query(api.settings.get, { key: HQ_LAST_MANUAL_TOKEN_KEY }) as Promise<RuntimeSettingRow | null>,
+      ]);
+
+      if (!latestUserMessage?._id) return;
+
+      const latestMessageId = String(latestUserMessage._id);
+      const manualDispatchToken =
+        typeof manualDispatchRow?.value === "string" ? manualDispatchRow.value : null;
+      const persistedLastMessageId =
+        typeof lastMessageRow?.value === "string" ? lastMessageRow.value : this.lastKnownHqMessageId;
+      const persistedLastManualToken =
+        typeof lastManualRow?.value === "string"
+          ? lastManualRow.value
+          : this.lastKnownManualDispatchToken;
+
+      const hasNewUserMessage =
+        !latestUserMessage.fromAgentId &&
+        (latestUserMessage.fromUser ?? true) &&
+        latestMessageId !== persistedLastMessageId;
+      const hasManualDispatch =
+        !!manualDispatchToken && manualDispatchToken !== persistedLastManualToken;
+
+      if (!hasNewUserMessage && !hasManualDispatch) {
+        return;
+      }
+
+      const agents = await this.getAgents();
+      const targets = this.resolveHqTargets(latestUserMessage, agents);
+      if (targets.length === 0) {
+        await this.rememberHqCursor(latestMessageId, manualDispatchToken);
+        return;
+      }
+
+      const prompt = this.buildHqPrompt(latestUserMessage.content ?? "");
+      for (const target of targets) {
+        if (!target.sessionKey) continue;
+
+        await this.setAgentStatus(target._id, "active");
+        try {
+          const transport = new OpenClawTransport({
+            agentId: target.name.toLowerCase(),
+            sessionKey: target.sessionKey,
+          });
+          const result = await transport.sendMessage(prompt);
+          const responseText = this.extractResponseText(result).trim();
+
+          if (responseText) {
+            await this.client.mutation(api.messages.send, {
+              channel: "hq",
+              content: responseText,
+              fromAgentId: target._id as any,
+              fromUser: false,
+            });
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[MissionControlRuntime] HQ response failed for ${target.name}:`, message);
+        } finally {
+          await this.setAgentStatus(target._id, "idle");
+        }
+      }
+
+      await this.rememberHqCursor(latestMessageId, manualDispatchToken);
+    } catch (error) {
+      console.error("[MissionControlRuntime] HQ orchestration failed:", error);
+    } finally {
+      this.hqInFlight = false;
     }
   }
 

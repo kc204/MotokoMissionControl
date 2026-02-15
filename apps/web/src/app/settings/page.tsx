@@ -48,6 +48,19 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
+function sameAutomationConfig(a: AutomationConfig, b: AutomationConfig) {
+  return (
+    a.autoDispatchEnabled === b.autoDispatchEnabled &&
+    a.notificationDeliveryEnabled === b.notificationDeliveryEnabled &&
+    a.notificationBatchSize === b.notificationBatchSize &&
+    a.heartbeatEnabled === b.heartbeatEnabled &&
+    a.heartbeatMaxNotifications === b.heartbeatMaxNotifications &&
+    a.heartbeatMaxTasks === b.heartbeatMaxTasks &&
+    a.heartbeatMaxActivities === b.heartbeatMaxActivities &&
+    a.heartbeatRequireChatUpdate === b.heartbeatRequireChatUpdate
+  );
+}
+
 export default function SettingsPage() {
   const settingsRowQuery = useQuery(api.settings.get, { key: "automation:config" });
   const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
@@ -61,34 +74,37 @@ export default function SettingsPage() {
   const tasks = (tasksQuery ?? []) as TaskRow[];
   const agents = (agentsQuery ?? []) as AgentRow[];
   const undeliveredNotifications = (notificationsQuery ?? []) as unknown[];
+  const taskIds = tasks.map((task) => task._id);
+  const taskIdsKey = taskIds.map(String).join("|");
+  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
 
   const dispatchRequests = useMemo(() => {
     const out: Record<
       string,
       { query: typeof api.taskDispatches.listForTask; args: { taskId: Id<"tasks">; limit: number } }
     > = {};
-    for (const task of tasks) {
-      out[`task_${task._id}`] = {
+    for (const taskId of stableTaskIds) {
+      out[`task_${taskId}`] = {
         query: api.taskDispatches.listForTask,
-        args: { taskId: task._id, limit: 40 },
+        args: { taskId, limit: 40 },
       };
     }
     return out;
-  }, [tasks]);
+  }, [stableTaskIds]);
 
   const dispatchResults = useQueries(dispatchRequests);
 
   const dispatchRows = useMemo(() => {
     const rows: DispatchRow[] = [];
-    for (const task of tasks) {
-      const key = `task_${task._id}`;
+    for (const taskId of stableTaskIds) {
+      const key = `task_${taskId}`;
       const result = dispatchResults[key];
       if (Array.isArray(result)) {
         rows.push(...(result as DispatchRow[]));
       }
     }
     return rows;
-  }, [dispatchResults, tasks]);
+  }, [dispatchResults, stableTaskIds]);
 
   const opsLoading =
     tasksQuery === undefined ||
@@ -179,7 +195,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!config) return;
-    setForm(config);
+    setForm((prev) => (sameAutomationConfig(prev, config) ? prev : config));
     setIsDirty(false);
   }, [config]);
 

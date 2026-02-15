@@ -27,12 +27,22 @@ export default function HQPage() {
 
   const [inputText, setInputText] = useState("");
   const [isDispatching, setIsDispatching] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState("");
 
+  const messageListRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const container = messageListRef.current;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const nearBottom = distanceFromBottom < 120;
+    if (nearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length]);
 
   const triggerDispatch = async () => {
     await setSetting({
@@ -43,14 +53,25 @@ export default function HQPage() {
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim()) return;
+    const content = inputText.trim();
+    if (!content || isSending) return;
 
-    await sendMessage({
-      channel: "hq",
-      content: inputText,
-    });
-    await triggerDispatch();
-    setInputText("");
+    setIsSending(true);
+    setSendError("");
+    try {
+      await sendMessage({
+        channel: "hq",
+        content,
+        fromUser: true,
+      });
+      await triggerDispatch();
+      setInputText("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSendError(message);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleDispatchNow = async () => {
@@ -63,6 +84,8 @@ export default function HQPage() {
   };
 
   const onlineCount = agents.filter((agent) => agent.status === "active").length;
+  const mentionableAgents = agents.filter((agent) => agent.status !== "offline");
+  const canSend = inputText.trim().length > 0 && !isSending;
 
   return (
     <div className="min-h-full p-6 lg:p-8">
@@ -104,7 +127,7 @@ export default function HQPage() {
               </button>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+            <div ref={messageListRef} className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
               {messages.map((msg) => {
                 const isSystem = !msg.agent;
                 return (
@@ -145,21 +168,46 @@ export default function HQPage() {
             </div>
 
             <div className="border-t border-white/10 bg-white/[0.03] p-3">
+              <div className="mb-2 flex flex-wrap gap-2">
+                {mentionableAgents.map((agent) => (
+                  <button
+                    key={agent._id}
+                    type="button"
+                    onClick={() => setInputText((prev) => `${prev}${prev ? " " : ""}@${agent.name}`)}
+                    className="rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-white/[0.08]"
+                  >
+                    @{agent.name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setInputText((prev) => `${prev}${prev ? " " : ""}@all`)}
+                  className="rounded-full border border-cyan-300/35 bg-cyan-500/10 px-2.5 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/20"
+                >
+                  @all
+                </button>
+              </div>
               <form onSubmit={handleSend} className="flex gap-2">
                 <input
                   type="text"
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Broadcast to all agents..."
+                  placeholder="Message HQ... use @name or @all"
                   className="flex-1 rounded-xl border border-white/10 bg-black/35 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 transition-colors focus:border-cyan-400/40 focus:outline-none"
                 />
                 <button
                   type="submit"
-                  className="rounded-xl border border-cyan-300/30 bg-cyan-500/15 px-5 py-2 text-sm font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/25"
+                  disabled={!canSend}
+                  className="rounded-xl border border-cyan-300/30 bg-cyan-500/15 px-5 py-2 text-sm font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/25 disabled:opacity-60"
                 >
-                  Send
+                  {isSending ? "Sending..." : "Send"}
                 </button>
               </form>
+              {sendError && (
+                <p className="mt-2 text-xs text-rose-300">
+                  Send failed: {sendError}
+                </p>
+              )}
             </div>
           </section>
 

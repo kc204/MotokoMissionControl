@@ -96,6 +96,9 @@ export default function RightSidebar({
 
   const agents = useMemo(() => (agentsQuery ?? []) as Agent[], [agentsQuery]);
   const tasks = useMemo(() => (tasksQuery ?? []) as TaskRow[], [tasksQuery]);
+  const taskIds = tasks.map((task) => task._id);
+  const taskIdsKey = taskIds.map(String).join("|");
+  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
 
   const documentRequests = useMemo(() => {
     const out: Record<
@@ -105,14 +108,14 @@ export default function RightSidebar({
         args: { taskId: Id<"tasks"> };
       }
     > = {};
-    for (const task of tasks) {
-      out[`task_${task._id}`] = {
+    for (const taskId of stableTaskIds) {
+      out[`task_${taskId}`] = {
         query: api.documents.listForTask,
-        args: { taskId: task._id },
+        args: { taskId },
       };
     }
     return out;
-  }, [tasks]);
+  }, [stableTaskIds]);
 
   const documentsByTask = useQueries(documentRequests);
 
@@ -127,8 +130,8 @@ export default function RightSidebar({
 
   const documents = useMemo(() => {
     const rows: DocumentRow[] = [];
-    for (const task of tasks) {
-      const key = `task_${task._id}`;
+    for (const taskId of stableTaskIds) {
+      const key = `task_${taskId}`;
       const result = documentsByTask[key];
       if (Array.isArray(result)) {
         for (const row of result as DocumentRow[]) {
@@ -140,7 +143,7 @@ export default function RightSidebar({
       }
     }
     return rows.sort((a, b) => b.createdAt - a.createdAt);
-  }, [documentsByTask, tasks]);
+  }, [documentsByTask, stableTaskIds]);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent._id === selectedAgentId),
@@ -317,4 +320,3 @@ export default function RightSidebar({
     </aside>
   );
 }
-

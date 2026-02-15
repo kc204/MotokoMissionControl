@@ -58,31 +58,34 @@ export interface ResolvedDocumentContext {
 export function useDocumentContextFallback(documentId: Id<"documents">) {
   const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
   const tasks = (tasksQuery ?? []) as TaskRow[];
+  const taskIds = tasks.map((task) => task._id);
+  const taskIdsKey = taskIds.map(String).join("|");
+  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
 
   const documentRequests = useMemo(() => {
     const out: Record<string, { query: typeof api.documents.listForTask; args: { taskId: Id<"tasks"> } }> = {};
-    for (const task of tasks) {
-      out[`task_${task._id}`] = {
+    for (const taskId of stableTaskIds) {
+      out[`task_${taskId}`] = {
         query: api.documents.listForTask,
-        args: { taskId: task._id },
+        args: { taskId },
       };
     }
     return out;
-  }, [tasks]);
+  }, [stableTaskIds]);
 
   const documentResults = useQueries(documentRequests);
 
   const documents = useMemo(() => {
     const rows: DocumentRow[] = [];
-    for (const task of tasks) {
-      const key = `task_${task._id}`;
+    for (const taskId of stableTaskIds) {
+      const key = `task_${taskId}`;
       const result = documentResults[key];
       if (Array.isArray(result)) {
         rows.push(...(result as DocumentRow[]));
       }
     }
     return rows;
-  }, [documentResults, tasks]);
+  }, [documentResults, stableTaskIds]);
 
   const selectedDocument = useMemo(() => {
     const targetId = String(documentId);
@@ -142,4 +145,3 @@ export function useDocumentContextFallback(documentId: Id<"documents">) {
     isLoading,
   };
 }
-

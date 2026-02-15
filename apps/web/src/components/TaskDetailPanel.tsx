@@ -167,16 +167,30 @@ export default function TaskDetailPanel({
     if (!active) return "idle";
     return active.status;
   }, [dispatches]);
+  const assigneeSignature = (task?.assigneeIds ?? []).map(String).join("|");
+  const tagSignature = (task?.tags ?? []).join("|");
 
   useEffect(() => {
     if (!task) return;
-    setTitle(task.title);
-    setDescription(task.description);
-    setStatus(task.status);
-    setPriority(task.priority);
-    setAssignees(task.assigneeIds ?? []);
-    setTags(task.tags ?? []);
-  }, [task]);
+    setTitle((prev) => (prev === task.title ? prev : task.title));
+    setDescription((prev) => (prev === task.description ? prev : task.description));
+    setStatus((prev) => (prev === task.status ? prev : task.status));
+    setPriority((prev) => (prev === task.priority ? prev : task.priority));
+    setAssignees((prev) => {
+      const next = task.assigneeIds ?? [];
+      if (prev.length === next.length && prev.every((id, index) => id === next[index])) {
+        return prev;
+      }
+      return next;
+    });
+    setTags((prev) => {
+      const next = task.tags ?? [];
+      if (prev.length === next.length && prev.every((tag, index) => tag === next[index])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [assigneeSignature, tagSignature, task?.description, task?.priority, task?.status, task?.title]);
 
   if (!taskId || !task) return null;
 

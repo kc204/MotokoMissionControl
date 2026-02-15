@@ -30,18 +30,57 @@ export const list = query({
       }
     }
 
-    const out = await Promise.all(
-      messages.reverse().map(async (msg) => {
-        const agent = msg.fromAgentId ? await ctx.db.get(msg.fromAgentId) : null;
-        return {
-          ...msg,
-          text: msg.content,
-          agent,
-        };
-      })
+    const ordered = messages.reverse();
+    const uniqueAgentIds = Array.from(
+      new Set(
+        ordered
+          .map((msg) => msg.fromAgentId)
+          .filter((id): id is NonNullable<typeof id> => Boolean(id))
+      )
     );
 
+    const agentRows = await Promise.all(uniqueAgentIds.map((id) => ctx.db.get(id)));
+    const agentsById = new Map(
+      agentRows
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
+        .map((row) => [row._id, row])
+    );
+
+    const out = ordered.map((msg) => ({
+      ...msg,
+      text: msg.content,
+      agent: msg.fromAgentId ? agentsById.get(msg.fromAgentId) ?? null : null,
+    }));
+
     return out;
+  },
+});
+
+export const latestForChannel = query({
+  args: { channel: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("messages")
+      .withIndex("by_channel", (q) => q.eq("channel", args.channel))
+      .order("desc")
+      .first();
+  },
+});
+
+export const latestUserForChannel = query({
+  args: { channel: v.string(), scanLimit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const scanLimit = Math.max(1, Math.min(200, args.scanLimit ?? 80));
+    const recent = await ctx.db
+      .query("messages")
+      .withIndex("by_channel", (q) => q.eq("channel", args.channel))
+      .order("desc")
+      .take(scanLimit);
+
+    return (
+      recent.find((row) => row.fromUser === true || (!row.fromAgentId && row.fromUser !== false)) ??
+      null
+    );
   },
 });
 
