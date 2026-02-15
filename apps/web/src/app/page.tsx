@@ -42,7 +42,7 @@ export default function HomePage() {
   const doneTasks = tasks.filter((t) => t.status === "done").length;
 
   return (
-    <div className="relative min-h-[calc(100vh-4rem)] p-6 lg:p-8">
+    <div className="relative min-h-full p-6 lg:p-8">
       {/* Grid background pattern */}
       <div className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:48px_48px]" />

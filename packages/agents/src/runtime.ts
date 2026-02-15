@@ -6,14 +6,26 @@ export interface AgentRuntime {
   sendHeartbeat(): Promise<void>;
 }
 
-export class OpenClawRuntime implements AgentRuntime {
-  constructor(public agent: Agent) {}
-  
-  async executeTask(task: Task): Promise<void> {
-    console.log(`Executing task ${task.id}`);
-  }
-  
-  async sendHeartbeat(): Promise<void> {
-    console.log("Heartbeat");
-  }
+export interface DispatchClaim {
+  dispatchId: string;
+  taskId: string;
+  prompt: string | null;
+  targetAgentId: string | null;
+  targetSessionKey: string | null;
+  taskTitle: string | null;
+  taskDescription: string | null;
+}
+
+export interface NotificationClaim {
+  notificationId: string;
+  targetAgentId: string;
+  targetSessionKey: string | null;
+  content: string;
+}
+
+export interface RuntimeConfig {
+  convexUrl: string;
+  runnerId?: string;
+  concurrency?: number;
+  claimTtlMs?: number;
 }

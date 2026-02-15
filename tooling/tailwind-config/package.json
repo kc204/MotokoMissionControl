@@ -1,0 +1,7 @@
+{
+  "name": "@motoko/tailwind-config",
+  "version": "2.0.0",
+  "private": true,
+  "main": "index.js",
+  "files": ["index.js"]
+}

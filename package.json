@@ -11,8 +11,9 @@
     "type-check": "turbo run type-check",
     "clean": "turbo run clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
-    "db:dev": "convex dev",
-    "db:deploy": "convex deploy",
+    "db:dev": "pnpm --filter @motoko/db db:dev",
+    "db:deploy": "pnpm --filter @motoko/db db:deploy",
+    "db:seed": "pnpm --filter @motoko/db db:seed",
     "cli": "pnpm --filter @motoko/cli",
     "web": "pnpm --filter @motoko/web"
   },

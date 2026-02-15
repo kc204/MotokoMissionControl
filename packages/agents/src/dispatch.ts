@@ -1,5 +1,11 @@
-import { Task, Agent } from "@motoko/core";
+import { DispatchClaim, NotificationClaim, type RuntimeConfig } from "./runtime";
+import { MissionControlRuntime } from "./mission-control-runtime";
+export { MissionControlRuntime };
+export type { RuntimeConfig };
+export { OpenClawTransport, type OpenClawResult, type OpenClawOptions } from "./openclaw";
+export type { DispatchClaim, NotificationClaim };
 
+// Backwards compatibility - TaskDispatcher is now deprecated in favor of MissionControlRuntime
 export interface DispatchResult {
   success: boolean;
   taskId: string;
@@ -7,30 +13,26 @@ export interface DispatchResult {
   error?: string;
 }
 
+/**
+ * @deprecated Use MissionControlRuntime instead
+ */
 export class TaskDispatcher {
-  async dispatch(task: Task, agents: Agent[]): Promise<DispatchResult> {
-    const availableAgent = agents.find(a => a.status === "idle");
-    
-    if (!availableAgent) {
-      return {
-        success: false,
-        taskId: task.id,
-        error: "No available agents"
-      };
-    }
-    
-    return {
-      success: true,
-      taskId: task.id,
-      agentId: availableAgent.id
-    };
+  private runtime?: MissionControlRuntime;
+
+  async start(config: RuntimeConfig): Promise<void> {
+    this.runtime = new MissionControlRuntime(config);
+    await this.runtime.start();
   }
-  
-  async dispatchToSquad(task: Task, squadId: string): Promise<DispatchResult> {
-    console.log(`Dispatching task ${task.id} to squad ${squadId}`);
+
+  stop(): void {
+    this.runtime?.stop();
+  }
+
+  async dispatchToSquad(taskId: string, squadId: string): Promise<DispatchResult> {
+    console.log(`[TaskDispatcher] Dispatching task ${taskId} to squad ${squadId}`);
     return {
       success: true,
-      taskId: task.id
+      taskId,
     };
   }
 }

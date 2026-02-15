@@ -20,7 +20,7 @@
     "clean": "rm -rf dist",
     "db:dev": "convex dev",
     "db:deploy": "convex deploy",
-    "db:seed": "convex run seed:default"
+    "db:seed": "convex run seed:seed"
   },
   "dependencies": {
     "@motoko/core": "workspace:*",

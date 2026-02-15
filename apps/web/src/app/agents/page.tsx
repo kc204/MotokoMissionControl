@@ -49,7 +49,7 @@ export default function AgentsPage() {
   };
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] p-6 lg:p-8">
+    <div className="min-h-full p-6 lg:p-8">
       <div className="mx-auto max-w-7xl">
         {/* Header */}
         <header className="mb-8 border-b border-white/10 pb-6">

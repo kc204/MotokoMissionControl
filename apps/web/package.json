@@ -21,14 +21,14 @@
   },
   "devDependencies": {
     "@motoko/eslint-config": "workspace:*",
-    "@motoko/tailwind-config": "workspace:*",
     "@motoko/typescript-config": "workspace:*",
+    "@tailwindcss/postcss": "^4.1.18",
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "autoprefixer": "^10.4.0",
-    "postcss": "^8.4.0",
-    "tailwindcss": "^4.0.0",
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
     "typescript": "^5.4.0"
   }
 }

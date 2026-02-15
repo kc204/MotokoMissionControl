@@ -19,11 +19,14 @@
   },
   "dependencies": {
     "@motoko/core": "workspace:*",
-    "@motoko/db": "workspace:*"
+    "@motoko/db": "workspace:*",
+    "convex": "^1.31.7",
+    "ws": "^8.18.1"
   },
   "devDependencies": {
     "@motoko/eslint-config": "workspace:*",
     "@motoko/typescript-config": "workspace:*",
+    "@types/node": "^20.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0"
   }

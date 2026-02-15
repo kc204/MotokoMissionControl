@@ -361,6 +361,8 @@ export default defineSchema({
     deliveredAt: v.optional(v.number()),
     error: v.optional(v.string()),
     attempts: v.optional(v.number()),
+    claimedBy: v.optional(v.string()),
+    claimedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_targetAgentId", ["targetAgentId"])

@@ -3,7 +3,8 @@
   "version": "2.0.0",
   "private": true,
   "bin": {
-    "mmc": "./dist/index.js"
+    "mmctl": "./dist/index.js",
+    "motoko": "./dist/index.js"
   },
   "scripts": {
     "build": "tsup src/index.ts --format cjs --target node20 --outDir dist",
@@ -12,8 +13,12 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@motoko/agents": "workspace:*",
+    "@motoko/core": "workspace:*",
+    "@motoko/db": "workspace:*",
     "commander": "^12.0.0",
     "chalk": "^5.3.0",
+    "convex": "^1.31.7",
     "ora": "^8.0.0"
   },
   "devDependencies": {
