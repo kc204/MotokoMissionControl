@@ -1,0 +1,9 @@
+@echo off
+echo Starting Mission Control v2...
+echo.
+echo [1/2] Starting Convex dev server in background...
+start "Convex Dev" powershell -NoExit -Command "cd '%~dp0' ; pnpm db:dev"
+echo.
+echo [2/2] Starting Next.js dev server...
+echo.
+pnpm dev
