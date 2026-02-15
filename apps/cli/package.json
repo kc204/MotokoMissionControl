@@ -1,0 +1,26 @@
+{
+  "name": "@motoko/cli",
+  "version": "2.0.0",
+  "private": true,
+  "bin": {
+    "mmc": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --target node20 --outDir dist",
+    "dev": "tsup src/index.ts --format cjs --target node20 --outDir dist --watch",
+    "lint": "eslint src/",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.0"
+  },
+  "devDependencies": {
+    "@motoko/eslint-config": "workspace:*",
+    "@motoko/typescript-config": "workspace:*",
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}

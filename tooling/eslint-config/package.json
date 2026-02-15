@@ -1,0 +1,12 @@
+{
+  "name": "@motoko/eslint-config",
+  "version": "2.0.0",
+  "private": true,
+  "main": "index.js",
+  "files": ["index.js"],
+  "dependencies": {
+    "eslint-config-next": "^15.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-config-turbo": "^2.0.0"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "@motoko/web",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "start": "next start",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@motoko/core": "workspace:*",
+    "@motoko/db": "workspace:*",
+    "@motoko/ui": "workspace:*",
+    "convex": "^1.31.7",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@motoko/eslint-config": "workspace:*",
+    "@motoko/tailwind-config": "workspace:*",
+    "@motoko/typescript-config": "workspace:*",
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}

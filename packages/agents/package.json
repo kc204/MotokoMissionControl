@@ -1,0 +1,30 @@
+{
+  "name": "@motoko/agents",
+  "version": "2.0.0",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "lint": "eslint src/",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@motoko/core": "workspace:*",
+    "@motoko/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@motoko/eslint-config": "workspace:*",
+    "@motoko/typescript-config": "workspace:*",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
