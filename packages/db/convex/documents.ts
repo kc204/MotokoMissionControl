@@ -20,6 +20,92 @@ export const listForTask = query({
   },
 });
 
+export const listAll = query({
+  args: {
+    type: v.optional(documentType),
+  },
+  handler: async (ctx, args) => {
+    const docs = await ctx.db.query("documents").withIndex("by_createdAt").order("desc").collect();
+    const filtered = !args.type ? docs : docs.filter((doc) => doc.type === args.type);
+
+    return await Promise.all(
+      filtered.map(async (doc) => {
+        const agent = doc.agentId ? await ctx.db.get(doc.agentId) : null;
+        return {
+          ...doc,
+          createdBy: doc.createdBy || agent?.name || "Unknown",
+          agentName: agent?.name ?? null,
+          agentAvatar: agent?.avatar ?? null,
+        };
+      })
+    );
+  },
+});
+
+export const get = query({
+  args: { id: v.id("documents") },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.id);
+  },
+});
+
+export const getWithContext = query({
+  args: { id: v.id("documents") },
+  handler: async (ctx, args) => {
+    const document = await ctx.db.get(args.id);
+    if (!document) return null;
+
+    const agent = document.agentId ? await ctx.db.get(document.agentId) : null;
+    const task = document.taskId ? await ctx.db.get(document.taskId) : null;
+    const originMessage = document.messageId ? await ctx.db.get(document.messageId) : null;
+
+    let conversationMessages: Array<{
+      _id: string;
+      content: string;
+      createdAt: number;
+      agentName: string | null;
+      agentAvatar: string | null;
+      fromUser: boolean;
+    }> = [];
+
+    if (document.taskId) {
+      const thread = await ctx.db
+        .query("messages")
+        .withIndex("by_taskId", (q) => q.eq("taskId", document.taskId))
+        .order("asc")
+        .collect();
+
+      conversationMessages = await Promise.all(
+        thread.map(async (msg) => {
+          const senderId = msg.fromAgentId;
+          const sender = senderId ? await ctx.db.get(senderId) : null;
+          return {
+            _id: msg._id,
+            content: msg.content ?? "",
+            createdAt: msg.createdAt,
+            agentName: sender?.name ?? null,
+            agentAvatar: sender?.avatar ?? null,
+            fromUser: Boolean(msg.fromUser),
+          };
+        })
+      );
+    }
+
+    return {
+      ...document,
+      createdBy: document.createdBy || agent?.name || "Unknown",
+      agentName: agent?.name ?? null,
+      agentAvatar: agent?.avatar ?? null,
+      agentRole: agent?.role ?? null,
+      taskTitle: task?.title ?? null,
+      taskStatus: task?.status ?? null,
+      taskDescription: task?.description ?? null,
+      originMessage: originMessage?.content ?? null,
+      conversationMessages,
+    };
+  },
+});
+
 export const create = mutation({
   args: {
     title: v.string(),
@@ -65,3 +151,48 @@ export const create = mutation({
   },
 });
 
+export const createDeliverable = mutation({
+  args: {
+    title: v.string(),
+    content: v.string(),
+    taskId: v.id("tasks"),
+    agentId: v.optional(v.id("agents")),
+    messageId: v.optional(v.id("messages")),
+    path: v.optional(v.string()),
+    createdBy: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const task = await ctx.db.get(args.taskId);
+    if (!task) throw new Error("Task not found");
+
+    const id = await ctx.db.insert("documents", {
+      title: args.title,
+      content: args.content,
+      type: "deliverable",
+      path: args.path,
+      taskId: args.taskId,
+      projectId: task.projectId,
+      agentId: args.agentId,
+      squadId: task.squadId,
+      embeddings: undefined,
+      metadata: undefined,
+      messageId: args.messageId,
+      createdBy: args.createdBy,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("activities", {
+      type: "document_created",
+      agentId: args.agentId,
+      taskId: args.taskId,
+      projectId: task.projectId,
+      squadId: task.squadId,
+      message: `Deliverable created: "${args.title}"`,
+      createdAt: now,
+    });
+
+    return id;
+  },
+});
