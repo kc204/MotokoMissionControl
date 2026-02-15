@@ -1,4 +1,4 @@
-import { Squad, Agent } from "@motoko/core";
+import { Squad } from "@motoko/core";
 
 export interface SquadManager {
   createSquad(name: string, agentIds: string[]): Promise<Squad>;

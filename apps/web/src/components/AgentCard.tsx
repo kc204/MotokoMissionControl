@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
+import { FALLBACK_MODELS, normalizeThinkingModelId } from "@/lib/models";
 
 interface AgentCardProps {
   id: Id<"agents">;
@@ -27,15 +28,6 @@ const statusStyles = {
   offline: "border-zinc-700/60 bg-zinc-800/30 text-zinc-500",
 } as const;
 
-// Hardcoded model options for now - in future should come from api.models.list
-const AVAILABLE_MODELS = [
-  { id: "kimi-coding/kimi-for-coding", name: "Kimi K2.5" },
-  { id: "anthropic/claude-3-5-sonnet", name: "Claude 3.5 Sonnet" },
-  { id: "openai/gpt-4o", name: "GPT-4o" },
-  { id: "openai/gpt-4o-mini", name: "GPT-4o Mini" },
-  { id: "anthropic/codex-cli", name: "Codex CLI" },
-];
-
 export default function AgentCard({
   id,
   name,
@@ -52,11 +44,19 @@ export default function AgentCard({
   const updateModel = useMutation(api.agents.updateModel);
   const [isEditing, setIsEditing] = useState(false);
 
-  const thinkingModelId =
-    models.thinking === "codex-cli" ? "anthropic/codex-cli" : models.thinking;
+  const thinkingModelId = normalizeThinkingModelId(models.thinking);
+
+  const availableModels = useMemo(() => {
+    const modelOptions = FALLBACK_MODELS;
+
+    if (modelOptions.some((model) => model.id === thinkingModelId)) {
+      return modelOptions;
+    }
+    return [{ id: thinkingModelId, name: thinkingModelId }, ...modelOptions];
+  }, [thinkingModelId]);
 
   const currentModelName =
-    AVAILABLE_MODELS.find((m) => m.id === thinkingModelId)?.name || models.thinking;
+    availableModels.find((model) => model.id === thinkingModelId)?.name || models.thinking;
 
   const handleModelChange = async (newModelId: string) => {
     try {
@@ -119,7 +119,7 @@ export default function AgentCard({
               onChange={(e) => handleModelChange(e.target.value)}
               className="w-full rounded-lg border border-white/15 bg-black/40 px-2 py-2 text-sm text-zinc-200 focus:border-cyan-400/40 focus:outline-none"
             >
-              {AVAILABLE_MODELS.map((m) => (
+              {availableModels.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
                 </option>

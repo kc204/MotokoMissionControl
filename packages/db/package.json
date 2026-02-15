@@ -17,7 +17,7 @@
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist",
+    "clean": "rimraf dist",
     "db:dev": "convex dev",
     "db:deploy": "convex deploy",
     "db:seed": "convex run seed:seed"

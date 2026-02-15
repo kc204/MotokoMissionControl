@@ -22,7 +22,7 @@ export class WebhookHandler {
   
   async broadcast(payload: WebhookPayload): Promise<void> {
     for (const [id, endpoint] of this.endpoints) {
-      console.log(`Broadcasting to ${id} at ${endpoint}`);
+      console.log(`Broadcasting ${payload.event} to ${id} at ${endpoint}`);
     }
   }
 }

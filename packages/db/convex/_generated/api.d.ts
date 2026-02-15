@@ -17,6 +17,7 @@ import type * as messages from "../messages.js";
 import type * as models from "../models.js";
 import type * as notifications from "../notifications.js";
 import type * as openclaw from "../openclaw.js";
+import type * as ops from "../ops.js";
 import type * as projects from "../projects.js";
 import type * as seed from "../seed.js";
 import type * as settings from "../settings.js";
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   models: typeof models;
   notifications: typeof notifications;
   openclaw: typeof openclaw;
+  ops: typeof ops;
   projects: typeof projects;
   seed: typeof seed;
   settings: typeof settings;

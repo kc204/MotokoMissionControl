@@ -1,24 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
+import { FALLBACK_MODELS, normalizeThinkingModelId } from "@/lib/models";
 
 interface AddAgentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreated?: (id: Id<"agents">) => void;
 }
-
-// Hardcoded model options - should match AgentCard
-const AVAILABLE_MODELS = [
-  { id: "kimi-coding/kimi-for-coding", name: "Kimi K2.5" },
-  { id: "anthropic/claude-3-5-sonnet", name: "Claude 3.5 Sonnet" },
-  { id: "openai/gpt-4o", name: "GPT-4o" },
-  { id: "openai/gpt-4o-mini", name: "GPT-4o Mini" },
-  { id: "anthropic/codex-cli", name: "Codex CLI" },
-];
 
 export default function AddAgentModal({
   isOpen,
@@ -40,6 +32,23 @@ export default function AddAgentModal({
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
+
+  const modelOptions = useMemo(() => {
+    const options = FALLBACK_MODELS;
+    const normalizedCurrent = normalizeThinkingModelId(thinkingModel);
+    if (options.some((model) => model.id === normalizedCurrent)) {
+      return options;
+    }
+    return [{ id: normalizedCurrent, name: normalizedCurrent }, ...options];
+  }, [thinkingModel]);
+
+  useEffect(() => {
+    if (modelOptions.length === 0) return;
+    const normalizedCurrent = normalizeThinkingModelId(thinkingModel);
+    if (!modelOptions.some((model) => model.id === normalizedCurrent)) {
+      setThinkingModel(modelOptions[0].id);
+    }
+  }, [modelOptions, thinkingModel]);
 
   if (!isOpen) return null;
 
@@ -227,7 +236,7 @@ export default function AddAgentModal({
               onChange={(e) => setThinkingModel(e.target.value)}
               className="w-full rounded-xl border border-white/10 bg-black/35 px-4 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
             >
-              {AVAILABLE_MODELS.map((m) => (
+              {modelOptions.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.name}
                 </option>

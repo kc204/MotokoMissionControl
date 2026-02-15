@@ -1,4 +1,4 @@
-import { Integration, IntegrationType } from "@motoko/core";
+import { IntegrationType } from "@motoko/core";
 
 export interface ConnectorConfig {
   apiKey?: string;

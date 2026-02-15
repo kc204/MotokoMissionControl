@@ -186,6 +186,45 @@ export const cancel = mutation({
   },
 });
 
+export const cancelForTask = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const rows = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+      .collect();
+
+    const active = rows.filter((row) => row.status === "pending" || row.status === "running");
+    if (active.length === 0) {
+      return { cancelled: 0 };
+    }
+
+    const reason =
+      args.reason?.trim() || `Stopped manually at ${new Date(now).toISOString()}`;
+
+    for (const row of active) {
+      await ctx.db.patch(row._id, {
+        status: "cancelled",
+        error: reason,
+        finishedAt: now,
+      });
+    }
+
+    await ctx.db.insert("activities", {
+      type: "dispatch_completed",
+      taskId: args.taskId,
+      message: `Cancelled ${active.length} active dispatch lane(s)`,
+      createdAt: now,
+    });
+
+    return { cancelled: active.length };
+  },
+});
+
 export const get = query({
   args: { dispatchId: v.id("taskDispatches") },
   handler: async (ctx, args) => {
@@ -196,12 +235,17 @@ export const get = query({
 export const listForTask = query({
   args: { taskId: v.id("tasks"), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const limit = Math.max(1, Math.min(200, args.limit ?? 20));
-    return await ctx.db
-      .query("taskDispatches")
-      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
-      .order("desc")
-      .take(limit);
+    try {
+      const limit = Math.max(1, Math.min(200, args.limit ?? 20));
+      return await ctx.db
+        .query("taskDispatches")
+        .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+        .order("desc")
+        .take(limit);
+    } catch (error) {
+      console.error("listForTask failed", error);
+      return [];
+    }
   },
 });
 
@@ -211,4 +255,3 @@ export const setStatus = mutation({
     await ctx.db.patch(args.dispatchId, { status: args.status });
   },
 });
-

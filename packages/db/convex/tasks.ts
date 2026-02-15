@@ -206,3 +206,80 @@ export const getPlanning = query({
     };
   },
 });
+
+export const getDispatchState = query({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, args) => {
+    try {
+      const dispatches = await ctx.db
+        .query("taskDispatches")
+        .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+        .collect();
+
+      const active = dispatches
+        .filter((row) => row.status === "pending" || row.status === "running")
+        .sort((a, b) => b.requestedAt - a.requestedAt)[0];
+
+      if (!active) return null;
+      return {
+        _id: active._id,
+        taskId: active.taskId,
+        status: active.status,
+        requestedAt: active.requestedAt,
+        startedAt: active.startedAt,
+        targetAgentId: active.targetAgentId,
+      };
+    } catch (error) {
+      console.error("getDispatchState failed", error);
+      return null;
+    }
+  },
+});
+
+export const listDispatchStates = query({
+  args: {},
+  handler: async (ctx) => {
+    try {
+      const [pending, running] = await Promise.all([
+        ctx.db
+          .query("taskDispatches")
+          .withIndex("by_status_requestedAt", (q) => q.eq("status", "pending"))
+          .collect(),
+        ctx.db
+          .query("taskDispatches")
+          .withIndex("by_status_requestedAt", (q) => q.eq("status", "running"))
+          .collect(),
+      ]);
+
+      const merged = [...pending, ...running].sort((a, b) => b.requestedAt - a.requestedAt);
+      const seen = new Set<string>();
+      const out: Array<{
+        _id: string;
+        taskId: string;
+        status: "pending" | "running";
+        requestedAt: number;
+        startedAt?: number;
+        targetAgentId?: string;
+      }> = [];
+
+      for (const row of merged) {
+        const key = row.taskId as string;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          _id: row._id as string,
+          taskId: row.taskId as string,
+          status: row.status === "running" ? "running" : "pending",
+          requestedAt: row.requestedAt,
+          startedAt: row.startedAt,
+          targetAgentId: row.targetAgentId as string | undefined,
+        });
+      }
+
+      return out;
+    } catch (error) {
+      console.error("listDispatchStates failed", error);
+      return [];
+    }
+  },
+});

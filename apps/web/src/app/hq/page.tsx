@@ -1,8 +1,8 @@
 "use client";
 
-import { useQuery, useMutation } from "convex/react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@motoko/db";
-import { useState, useRef, useEffect } from "react";
 
 interface Agent {
   _id: string;
@@ -21,13 +21,25 @@ interface Message {
 export default function HQPage() {
   const messages = (useQuery(api.messages.list, { channel: "hq" }) || []) as Message[];
   const agents = (useQuery(api.agents.list) || []) as Agent[];
+
   const sendMessage = useMutation(api.messages.send);
+  const setSetting = useMutation(api.settings.set);
+
   const [inputText, setInputText] = useState("");
+  const [isDispatching, setIsDispatching] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const triggerDispatch = async () => {
+    await setSetting({
+      key: "orchestrator:manual_dispatch",
+      value: Date.now().toString(),
+    });
+  };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,15 +49,24 @@ export default function HQPage() {
       channel: "hq",
       content: inputText,
     });
+    await triggerDispatch();
     setInputText("");
   };
 
-  const onlineCount = agents.filter((a) => a.status === "active").length;
+  const handleDispatchNow = async () => {
+    setIsDispatching(true);
+    try {
+      await triggerDispatch();
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
+  const onlineCount = agents.filter((agent) => agent.status === "active").length;
 
   return (
     <div className="min-h-full p-6 lg:p-8">
       <div className="mx-auto max-w-7xl">
-        {/* Header */}
         <header className="mb-6 border-b border-white/10 pb-5">
           <div className="flex items-end justify-between gap-4">
             <div>
@@ -64,15 +85,23 @@ export default function HQPage() {
         </header>
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
-          {/* Chat Section */}
           <section className="flex h-[72vh] flex-col overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(9,13,21,0.94),rgba(5,8,13,0.94))]">
             <div className="flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-300">
                   HQ Channel
                 </h2>
-                <p className="mt-1 text-xs text-zinc-500">Messages are routed to specialists in real-time.</p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Messages are routed to specialists in real-time.
+                </p>
               </div>
+              <button
+                onClick={handleDispatchNow}
+                disabled={isDispatching}
+                className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-60"
+              >
+                {isDispatching ? "Dispatching..." : "Dispatch Now"}
+              </button>
             </div>
 
             <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
@@ -84,7 +113,7 @@ export default function HQPage() {
                     className={`flex gap-3 ${isSystem ? "justify-end" : "justify-start"}`}
                   >
                     {!isSystem && (
-                      <div className="h-8 w-8 flex-shrink-0 overflow-hidden rounded-full border border-white/10 bg-zinc-800 flex items-center justify-center">
+                      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-full border border-white/10 bg-zinc-800">
                         <span className="text-xs text-zinc-400">{msg.agent!.name[0]}</span>
                       </div>
                     )}
@@ -134,7 +163,6 @@ export default function HQPage() {
             </div>
           </section>
 
-          {/* Agent Roster */}
           <aside className="h-[72vh] overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(9,13,21,0.95),rgba(6,9,14,0.95))]">
             <div className="border-b border-white/10 px-4 py-3">
               <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
@@ -154,8 +182,8 @@ export default function HQPage() {
                         agent.status === "active"
                           ? "border-emerald-500/40 bg-emerald-500/20 text-emerald-200"
                           : agent.status === "blocked"
-                          ? "border-red-500/40 bg-red-500/20 text-red-200"
-                          : "border-zinc-600/60 bg-zinc-700/30 text-zinc-300"
+                            ? "border-red-500/40 bg-red-500/20 text-red-200"
+                            : "border-zinc-600/60 bg-zinc-700/30 text-zinc-300"
                       }`}
                     >
                       {agent.status}

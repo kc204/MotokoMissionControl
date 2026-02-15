@@ -9,6 +9,7 @@ const links = [
   { href: "/tasks", label: "Tasks" },
   { href: "/workflows", label: "Workflows" },
   { href: "/hq", label: "HQ Chat" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function TopNav() {
