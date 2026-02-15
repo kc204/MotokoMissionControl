@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Legacy Reference Code
 
-## Getting Started
+This folder contains the original Mission Control implementation. **Use it as reference when building v2 features.**
 
-First, run the development server:
+## What's Here
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- `src/components/` - Legacy React components (RightSidebar, Agent panels, Document trays, etc.)
+- `convex/` - Legacy Convex queries, mutations, and schema
+- `hooks/` - Legacy custom React hooks
+- `docs/` - Documentation and analysis
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## When to Reference
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Adding new features to v2 → Check if similar feature existed in legacy
+- Porting components → Copy structure, adapt to v2 patterns (@motoko/db imports, etc.)
+- Understanding schema relationships → Legacy has the full data model
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Key Patterns to Port
 
-## Learn More
+- Live Feed / Documents sidebar → `src/components/RightSidebar.tsx`
+- Agent roster panel → `src/components/AgentsSidebarPanel.tsx`
+- Document conversation tray → `src/components/DocumentConversationTray.tsx`
+- Activity queries → `convex/activities.ts` (listFiltered)
+- Document queries → `convex/documents.ts` (listAll, getWithContext)
 
-To learn more about Next.js, take a look at the following resources:
+## V2 Differences
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- Legacy: Direct file imports (`@/components/...`)
+- v2: Package imports (`@motoko/db`, `@motoko/ui`)
+- Legacy: `createdByAgentId` field names
+- v2: `agentId` field names (check schema.ts)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+**Consult this folder before reinventing features.**

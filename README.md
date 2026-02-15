@@ -22,6 +22,8 @@ motoko-mission-control/
 └── _legacy/              # Original codebase (reference)
 ```
 
+> **For AI Coding Models:** When adding features, check `_legacy/` folder first. It contains working implementations of components, Convex queries, and patterns. See `_legacy/README.md` for details on what exists and how to port it to v2.
+
 ## Quick Start
 
 ### Prerequisites
