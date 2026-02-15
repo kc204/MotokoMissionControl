@@ -14,6 +14,7 @@ import type * as agents from "../agents.js";
 import type * as documents from "../documents.js";
 import type * as http from "../http.js";
 import type * as messages from "../messages.js";
+import type * as models from "../models.js";
 import type * as notifications from "../notifications.js";
 import type * as openclaw from "../openclaw.js";
 import type * as projects from "../projects.js";
@@ -36,6 +37,7 @@ declare const fullApi: ApiFromModules<{
   documents: typeof documents;
   http: typeof http;
   messages: typeof messages;
+  models: typeof models;
   notifications: typeof notifications;
   openclaw: typeof openclaw;
   projects: typeof projects;

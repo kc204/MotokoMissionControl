@@ -1,4 +1,4 @@
-import { query } from "convex/server";
+import { query } from "./_generated/server";
 
 // Hardcoded list of available AI models
 // In the future, this could be fetched from a configuration or external API
