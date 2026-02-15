@@ -1,49 +1,29 @@
 {
-  "name": "mission-control",
-  "version": "0.1.0",
+  "name": "motoko-mission-control",
+  "version": "2.0.0",
   "private": true,
+  "description": "Next-generation AI agent orchestration platform",
   "scripts": {
-    "dev": "next dev",
-    "dev:safe": "tsx scripts/dev-safe.ts",
-    "convex:dev": "convex dev",
-    "stack:start": "concurrently -n convex,web,watcher,dispatch,notify -c blue,green,magenta,yellow,cyan \"npm:convex:dev\" \"npm:dev:safe\" \"npm:daemon:watcher\" \"npm:daemon:dispatch\" \"npm:daemon:notifications\"",
-    "stack:services": "concurrently -n convex,watcher,dispatch,notify -c blue,magenta,yellow,cyan \"npm:convex:dev\" \"npm:daemon:watcher\" \"npm:daemon:dispatch\" \"npm:daemon:notifications\"",
-    "daemon:notifications": "tsx scripts/poll-notifications.ts",
-    "daemon:watcher": "tsx scripts/watcher.ts",
-    "daemon:dispatch": "tsx scripts/task-dispatcher.ts",
-    "stack:status": "tsx scripts/system-status.ts",
-    "orchestrator:run": "tsx scripts/orchestrator.ts",
-    "orchestrator:heartbeat": "tsx scripts/heartbeat-orchestrator.ts --agent main",
-    "openclaw:setup-heartbeats": "tsx scripts/setup-heartbeat-crons.ts",
-    "openclaw:sync-agents": "tsx scripts/openclaw-sync-agents.ts",
-    "openclaw:install-hook": "tsx scripts/install-openclaw-hook.ts",
-    "openclaw:configure-hook": "tsx scripts/configure-openclaw-hook.ts",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
-    "@google/generative-ai": "^0.24.1",
-    "convex": "^1.31.7",
-    "dotenv": "^17.2.4",
-    "next": "16.1.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-markdown": "^10.1.0"
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "lint:fix": "turbo run lint:fix",
+    "type-check": "turbo run type-check",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
+    "db:dev": "convex dev",
+    "db:deploy": "convex deploy",
+    "cli": "pnpm --filter @motoko/cli",
+    "web": "pnpm --filter @motoko/web"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "concurrently": "^9.1.2",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6",
-    "tailwindcss": "^4",
-    "tsx": "^4.20.6",
-    "typescript": "^5"
+    "@turbo/gen": "^2.0.0",
+    "prettier": "^3.2.5",
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  },
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
