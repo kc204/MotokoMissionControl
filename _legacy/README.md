@@ -1,33 +1,32 @@
 # Legacy Reference Code
 
-This folder contains the original Mission Control implementation. **Use it as reference when building v2 features.**
+This folder contains the original Mission Control v1 implementation.
+
+## ⚠️ For AI Coding Models
+
+**DO NOT reference this folder unless KC explicitly requests it.**
+
+This folder is kept for reference only when KC specifically asks for a feature to be ported from legacy to v2. Do not automatically check here when building new features.
 
 ## What's Here
 
-- `src/components/` - Legacy React components (RightSidebar, Agent panels, Document trays, etc.)
+- `src/components/` - Legacy React components
 - `convex/` - Legacy Convex queries, mutations, and schema
 - `hooks/` - Legacy custom React hooks
 - `docs/` - Documentation and analysis
 
-## When to Reference
+## When to Use
 
-- Adding new features to v2 → Check if similar feature existed in legacy
-- Porting components → Copy structure, adapt to v2 patterns (@motoko/db imports, etc.)
-- Understanding schema relationships → Legacy has the full data model
+**Only when KC says:**
+- "Port this from legacy"
+- "Check the legacy implementation"
+- "Add this feature from the old version"
 
-## Key Patterns to Port
-
-- Live Feed / Documents sidebar → `src/components/RightSidebar.tsx`
-- Agent roster panel → `src/components/AgentsSidebarPanel.tsx`
-- Document conversation tray → `src/components/DocumentConversationTray.tsx`
-- Activity queries → `convex/activities.ts` (listFiltered)
-- Document queries → `convex/documents.ts` (listAll, getWithContext)
-
-## V2 Differences
+## V2 Differences (if porting)
 
 - Legacy: Direct file imports (`@/components/...`)
 - v2: Package imports (`@motoko/db`, `@motoko/ui`)
 - Legacy: `createdByAgentId` field names
 - v2: `agentId` field names (check schema.ts)
 
-**Consult this folder before reinventing features.**
+**Wait for KC's explicit instruction before using this reference.**
