@@ -6,7 +6,8 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
-    "start": "./dev.bat",
+    "start": "concurrently -n convex,web -c cyan,green \"pnpm db:dev\" \"pnpm web:dev\"",
+    "start:win": "concurrently -n convex,web -c cyan,green \"pnpm db:dev\" \"pnpm web:dev\"",
     "lint": "turbo run lint",
     "lint:fix": "turbo run lint:fix",
     "type-check": "turbo run type-check",
@@ -15,11 +16,13 @@
     "db:dev": "pnpm --filter @motoko/db db:dev",
     "db:deploy": "pnpm --filter @motoko/db db:deploy",
     "db:seed": "pnpm --filter @motoko/db db:seed",
+    "web:dev": "pnpm --filter @motoko/web dev",
     "cli": "pnpm --filter @motoko/cli",
     "web": "pnpm --filter @motoko/web"
   },
   "devDependencies": {
     "@turbo/gen": "^2.0.0",
+    "concurrently": "^9.2.1",
     "prettier": "^3.2.5",
     "turbo": "^2.0.0",
     "typescript": "^5.4.0"
