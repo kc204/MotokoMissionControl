@@ -122,7 +122,7 @@ export default function TaskDetailPanel({
 
   const updateTask = useMutation(api.tasks.update);
   const enqueueDispatch = useMutation(api.taskDispatches.enqueue);
-  const cancelDispatch = useMutation(api.taskDispatches.cancel);
+  const cancelDispatchForTask = useMutation(api.taskDispatches.cancelForTask);
   const sendMessage = useMutation(api.messages.send);
   const createDocument = useMutation(api.documents.create);
 
@@ -272,13 +272,10 @@ export default function TaskDetailPanel({
 
     setIsStoppingDispatch(true);
     try {
-      await Promise.all(
-        activeDispatches.map((dispatch) =>
-          cancelDispatch({
-            dispatchId: dispatch._id,
-          })
-        )
-      );
+      await cancelDispatchForTask({
+        taskId: task._id,
+        reason: "Stopped from task detail panel",
+      });
 
       if (task.status === "in_progress" || task.status === "testing") {
         await updateTask({

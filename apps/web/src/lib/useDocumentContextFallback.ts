@@ -1,36 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQueries, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
-
-interface TaskRow {
-  _id: Id<"tasks">;
-  title: string;
-  description: string;
-  status?: string;
-}
-
-interface DocumentRow {
-  _id: Id<"documents">;
-  title: string;
-  type: "deliverable" | "research" | "spec" | "note" | "markdown";
-  content: string;
-  createdBy?: string;
-  createdAt?: number;
-  path?: string;
-  taskId?: Id<"tasks">;
-}
-
-interface MessageRow {
-  _id: string;
-  content?: string;
-  text?: string;
-  createdAt: number;
-  fromUser?: boolean;
-  agent?: { name?: string | null; avatar?: string | null } | null;
-}
 
 export interface ResolvedDocumentContext {
   _id: Id<"documents">;
@@ -56,89 +29,40 @@ export interface ResolvedDocumentContext {
 }
 
 export function useDocumentContextFallback(documentId: Id<"documents">) {
-  const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
-  const tasks = (tasksQuery ?? []) as TaskRow[];
-  const taskIds = tasks.map((task) => task._id);
-  const taskIdsKey = taskIds.map(String).join("|");
-  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
-
-  const documentRequests = useMemo(() => {
-    const out: Record<string, { query: typeof api.documents.listForTask; args: { taskId: Id<"tasks"> } }> = {};
-    for (const taskId of stableTaskIds) {
-      out[`task_${taskId}`] = {
-        query: api.documents.listForTask,
-        args: { taskId },
-      };
-    }
-    return out;
-  }, [stableTaskIds]);
-
-  const documentResults = useQueries(documentRequests);
-
-  const documents = useMemo(() => {
-    const rows: DocumentRow[] = [];
-    for (const taskId of stableTaskIds) {
-      const key = `task_${taskId}`;
-      const result = documentResults[key];
-      if (Array.isArray(result)) {
-        rows.push(...(result as DocumentRow[]));
-      }
-    }
-    return rows;
-  }, [documentResults, stableTaskIds]);
-
-  const selectedDocument = useMemo(() => {
-    const targetId = String(documentId);
-    return documents.find((doc) => String(doc._id) === targetId) ?? null;
-  }, [documentId, documents]);
-
-  const selectedTaskId = selectedDocument?.taskId;
-  const selectedTaskQuery = useQuery(
-    api.tasks.get,
-    selectedTaskId ? { id: selectedTaskId } : "skip"
-  );
-  const taskMessagesQuery = useQuery(
-    api.messages.list,
-    selectedTaskId ? { channel: `task:${selectedTaskId}` } : "skip"
-  );
-
-  const selectedTask = (selectedTaskQuery ?? null) as TaskRow | null;
-  const taskMessages = (taskMessagesQuery ?? []) as MessageRow[];
+  const contextQuery = useQuery(api.documents.getWithContext, { id: documentId });
 
   const context = useMemo<ResolvedDocumentContext | null>(() => {
-    if (!selectedDocument) return null;
+    if (!contextQuery) return null;
 
-    const orderedMessages = [...taskMessages].sort((a, b) => a.createdAt - b.createdAt);
-    const conversationMessages = orderedMessages.map((msg) => ({
-      _id: String(msg._id),
-      content: (msg.content ?? msg.text ?? "").trim(),
-      createdAt: msg.createdAt,
-      agentName: msg.agent?.name ?? null,
-      agentAvatar: msg.agent?.avatar ?? null,
-      fromUser: Boolean(msg.fromUser),
-    }));
+    const conversationMessages = Array.isArray(contextQuery.conversationMessages)
+      ? contextQuery.conversationMessages.map((msg: any) => ({
+          _id: String(msg._id),
+          content: (msg.content ?? "").trim(),
+          createdAt: msg.createdAt ?? 0,
+          agentName: msg.agentName ?? null,
+          agentAvatar: msg.agentAvatar ?? null,
+          fromUser: Boolean(msg.fromUser),
+        }))
+      : [];
 
     return {
-      _id: selectedDocument._id,
-      title: selectedDocument.title,
-      type: selectedDocument.type,
-      content: selectedDocument.content ?? "",
-      createdBy: selectedDocument.createdBy || "Unknown",
-      createdAt: selectedDocument.createdAt ?? 0,
-      path: selectedDocument.path,
-      taskId: selectedDocument.taskId,
-      taskTitle: selectedTask?.title,
-      taskStatus: selectedTask?.status,
-      taskDescription: selectedTask?.description,
-      originMessage: conversationMessages[0]?.content || undefined,
+      _id: contextQuery._id,
+      title: contextQuery.title,
+      type: contextQuery.type,
+      content: contextQuery.content ?? "",
+      createdBy: contextQuery.createdBy || "Unknown",
+      createdAt: contextQuery.createdAt ?? 0,
+      path: contextQuery.path,
+      taskId: contextQuery.taskId,
+      taskTitle: contextQuery.taskTitle ?? undefined,
+      taskStatus: contextQuery.taskStatus ?? undefined,
+      taskDescription: contextQuery.taskDescription ?? undefined,
+      originMessage: contextQuery.originMessage ?? undefined,
       conversationMessages,
     };
-  }, [selectedDocument, selectedTask, taskMessages]);
+  }, [contextQuery]);
 
-  const documentsLoading =
-    tasksQuery === undefined ||
-    Object.values(documentResults).some((row) => row === undefined);
-  const isLoading = documentsLoading || (selectedTaskId ? selectedTaskQuery === undefined : false);
+  const isLoading = contextQuery === undefined;
 
   return {
     context,

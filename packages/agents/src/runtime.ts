@@ -14,6 +14,9 @@ export interface DispatchClaim {
   targetSessionKey: string | null;
   taskTitle: string | null;
   taskDescription: string | null;
+  taskPriority?: "low" | "medium" | "high" | "urgent" | null;
+  taskTags?: string[] | null;
+  threadMessages?: Array<{ fromUser: boolean; text: string }>;
 }
 
 export interface NotificationClaim {

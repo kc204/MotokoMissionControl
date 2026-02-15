@@ -26,6 +26,28 @@ const planningStatus = v.union(
   v.literal("approved")
 );
 
+async function insertAssigneeNotification(
+  ctx: any,
+  targetAgentId: string,
+  content: string,
+  taskId: string
+) {
+  const now = Date.now();
+  await ctx.db.insert("notifications", {
+    targetAgentId,
+    content,
+    sourceTaskId: taskId,
+    sourceMessageId: undefined,
+    delivered: false,
+    deliveredAt: undefined,
+    error: undefined,
+    attempts: 0,
+    claimedBy: undefined,
+    claimedAt: undefined,
+    createdAt: now,
+  });
+}
+
 export const get = query({
   args: { id: v.id("tasks") },
   handler: async (ctx, args) => {
@@ -79,13 +101,15 @@ export const create = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const assigneeIds = args.assigneeIds ?? [];
+    const initialStatus = assigneeIds.length > 0 ? "assigned" : "inbox";
     const taskId = await ctx.db.insert("tasks", {
       title: args.title,
       description: args.description,
-      status: "inbox",
+      status: initialStatus,
       priority: args.priority ?? "medium",
       projectId: args.projectId,
-      assigneeIds: args.assigneeIds ?? [],
+      assigneeIds,
       squadId: args.squadId,
       createdBy: args.createdBy ?? "user",
       tags: args.tags,
@@ -111,7 +135,7 @@ export const create = mutation({
       createdAt: now,
     });
 
-    for (const agentId of args.assigneeIds ?? []) {
+    for (const agentId of assigneeIds) {
       const existing = await ctx.db
         .query("taskSubscriptions")
         .withIndex("by_taskId_agentId", (q) =>
@@ -126,6 +150,13 @@ export const create = mutation({
           createdAt: now,
         });
       }
+
+      await insertAssigneeNotification(
+        ctx,
+        agentId as string,
+        `New task assigned: "${args.title}"`,
+        taskId as string
+      );
     }
 
     return taskId;
@@ -152,29 +183,66 @@ export const update = mutation({
     if (!existing) return;
 
     const now = Date.now();
-    const statusChanged =
-      args.status !== undefined && args.status !== existing.status;
+    const nextAssigneeIds = args.assigneeIds ?? existing.assigneeIds;
+    const currentAssignees = new Set((existing.assigneeIds ?? []).map(String));
+    const nextAssignees = new Set((nextAssigneeIds ?? []).map(String));
+    const addedAssigneeIds = Array.from(nextAssignees).filter((id) => !currentAssignees.has(id));
+
+    let resolvedStatus = args.status;
+    if (resolvedStatus === undefined && args.assigneeIds !== undefined) {
+      if (nextAssigneeIds.length > 0 && existing.status === "inbox") {
+        resolvedStatus = "assigned";
+      } else if (nextAssigneeIds.length === 0 && existing.status === "assigned") {
+        resolvedStatus = "inbox";
+      }
+    }
+
+    const statusChanged = resolvedStatus !== undefined && resolvedStatus !== existing.status;
 
     const patch: Record<string, unknown> = { updatedAt: now };
     if (args.title !== undefined) patch.title = args.title;
     if (args.description !== undefined) patch.description = args.description;
-    if (args.status !== undefined) patch.status = args.status;
+    if (resolvedStatus !== undefined) patch.status = resolvedStatus;
     if (args.priority !== undefined) patch.priority = args.priority;
     if (args.projectId !== undefined) patch.projectId = args.projectId;
-    if (args.assigneeIds !== undefined) patch.assigneeIds = args.assigneeIds;
+    if (args.assigneeIds !== undefined) patch.assigneeIds = nextAssigneeIds;
     if (args.squadId !== undefined) patch.squadId = args.squadId;
     if (args.tags !== undefined) patch.tags = args.tags;
     if (args.planningStatus !== undefined) patch.planningStatus = args.planningStatus;
     if (args.planningQuestions !== undefined) patch.planningQuestions = args.planningQuestions;
     if (args.planningDraft !== undefined) patch.planningDraft = args.planningDraft;
 
-    if (args.status === "done" && existing.completedAt == null) {
+    if (resolvedStatus === "done" && existing.completedAt == null) {
       patch.completedAt = now;
     }
 
     await ctx.db.patch(args.id, patch as any);
 
-    if (statusChanged && args.status === "done") {
+    for (const assigneeId of addedAssigneeIds) {
+      const existingSub = await ctx.db
+        .query("taskSubscriptions")
+        .withIndex("by_taskId_agentId", (q) =>
+          q.eq("taskId", args.id).eq("agentId", assigneeId as any)
+        )
+        .first();
+      if (!existingSub) {
+        await ctx.db.insert("taskSubscriptions", {
+          taskId: args.id,
+          agentId: assigneeId as any,
+          reason: "assigned",
+          createdAt: now,
+        });
+      }
+
+      await insertAssigneeNotification(
+        ctx,
+        assigneeId,
+        `You were assigned to "${existing.title}" by Mission Control.`,
+        args.id as string
+      );
+    }
+
+    if (statusChanged && resolvedStatus === "done") {
       await ctx.db.insert("activities", {
         type: "task_completed",
         taskId: args.id,

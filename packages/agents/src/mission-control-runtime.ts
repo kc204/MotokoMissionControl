@@ -505,6 +505,11 @@ export class MissionControlRuntime {
       return;
     }
 
+    const targetAgentId = claim.targetAgentId ?? null;
+    if (targetAgentId) {
+      await this.setAgentStatus(targetAgentId, "active");
+    }
+
     try {
       // Create OpenClaw transport
       const transport = new OpenClawTransport({
@@ -522,6 +527,16 @@ export class MissionControlRuntime {
       const responseText = this.extractResponseText(result);
       const preview = this.truncate(responseText || "Task completed", 800);
 
+      if (responseText.trim()) {
+        await this.client.mutation(api.messages.send, {
+          channel: `task:${claim.taskId}`,
+          taskId: claim.taskId as any,
+          content: responseText.trim(),
+          fromAgentId: (claim.targetAgentId ?? undefined) as any,
+          fromUser: false,
+        });
+      }
+
       console.log(`[Dispatch] Completed ${claim.dispatchId}: ${preview}`);
 
       // Mark dispatch as complete
@@ -534,6 +549,10 @@ export class MissionControlRuntime {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[Dispatch] Failed ${claim.dispatchId}:`, errorMessage);
       await this.failDispatch(claim.dispatchId, errorMessage);
+    } finally {
+      if (targetAgentId) {
+        await this.setAgentStatus(targetAgentId, "idle");
+      }
     }
   }
 
@@ -595,14 +614,37 @@ export class MissionControlRuntime {
     const title = claim.taskTitle || "Untitled Task";
     const description = claim.taskDescription || "No description provided.";
     const prompt = claim.prompt;
+    const priority = claim.taskPriority || "medium";
+    const tags = claim.taskTags?.length ? claim.taskTags.join(", ") : "none";
+    const threadLines =
+      claim.threadMessages
+        ?.slice(-8)
+        .map((item) => `${item.fromUser ? "USER/HQ" : "AGENT"}: ${this.truncate(item.text, 220)}`)
+        .join("\n") || "No prior thread messages.";
 
-    const parts = [`Task: ${title}`, "", "Description:", description, ""];
+    const parts = [
+      `Task: ${title}`,
+      `Priority: ${priority}`,
+      `Tags: ${tags}`,
+      "",
+      "Description:",
+      description,
+      "",
+    ];
 
     if (prompt) {
       parts.push("Additional Instructions:", prompt, "");
     }
 
-    parts.push("Please complete this task and provide a summary of what was done.");
+    parts.push(
+      "Recent task thread:",
+      threadLines,
+      "",
+      "Please complete this task and provide:",
+      "1) what you changed or validated,",
+      "2) key handoff notes,",
+      "3) blockers prefixed with BLOCKED: if any."
+    );
 
     return parts.join("\n");
   }

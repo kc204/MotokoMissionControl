@@ -28,17 +28,29 @@ export const listAll = query({
     const docs = await ctx.db.query("documents").withIndex("by_createdAt").order("desc").collect();
     const filtered = !args.type ? docs : docs.filter((doc) => doc.type === args.type);
 
-    return await Promise.all(
-      filtered.map(async (doc) => {
-        const agent = doc.agentId ? await ctx.db.get(doc.agentId) : null;
-        return {
-          ...doc,
-          createdBy: doc.createdBy || agent?.name || "Unknown",
-          agentName: agent?.name ?? null,
-          agentAvatar: agent?.avatar ?? null,
-        };
-      })
+    const uniqueAgentIds = Array.from(
+      new Set(
+        filtered
+          .map((doc) => doc.agentId)
+          .filter((id): id is NonNullable<typeof id> => Boolean(id))
+      )
     );
+    const agentRows = await Promise.all(uniqueAgentIds.map((id) => ctx.db.get(id)));
+    const agentsById = new Map(
+      agentRows
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
+        .map((row) => [row._id, row])
+    );
+
+    return filtered.map((doc) => {
+      const agent = doc.agentId ? agentsById.get(doc.agentId) ?? null : null;
+      return {
+        ...doc,
+        createdBy: doc.createdBy || agent?.name || "Unknown",
+        agentName: agent?.name ?? null,
+        agentAvatar: agent?.avatar ?? null,
+      };
+    });
   },
 });
 
@@ -74,21 +86,31 @@ export const getWithContext = query({
         .withIndex("by_taskId", (q) => q.eq("taskId", document.taskId))
         .order("asc")
         .collect();
-
-      conversationMessages = await Promise.all(
-        thread.map(async (msg) => {
-          const senderId = msg.fromAgentId;
-          const sender = senderId ? await ctx.db.get(senderId) : null;
-          return {
-            _id: msg._id,
-            content: msg.content ?? "",
-            createdAt: msg.createdAt,
-            agentName: sender?.name ?? null,
-            agentAvatar: sender?.avatar ?? null,
-            fromUser: Boolean(msg.fromUser),
-          };
-        })
+      const uniqueSenderIds = Array.from(
+        new Set(
+          thread
+            .map((msg) => msg.fromAgentId)
+            .filter((id): id is NonNullable<typeof id> => Boolean(id))
+        )
       );
+      const senderRows = await Promise.all(uniqueSenderIds.map((id) => ctx.db.get(id)));
+      const sendersById = new Map(
+        senderRows
+          .filter((row): row is NonNullable<typeof row> => Boolean(row))
+          .map((row) => [row._id, row])
+      );
+
+      conversationMessages = thread.map((msg) => {
+        const sender = msg.fromAgentId ? sendersById.get(msg.fromAgentId) ?? null : null;
+        return {
+          _id: msg._id,
+          content: msg.content ?? "",
+          createdAt: msg.createdAt,
+          agentName: sender?.name ?? null,
+          agentAvatar: sender?.avatar ?? null,
+          fromUser: Boolean(msg.fromUser),
+        };
+      });
     }
 
     return {

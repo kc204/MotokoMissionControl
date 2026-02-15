@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQueries, useQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
 
@@ -20,10 +20,6 @@ type TabId = "live-feed" | "documents";
 interface Agent {
   _id: Id<"agents">;
   name: string;
-}
-
-interface TaskRow {
-  _id: Id<"tasks">;
 }
 
 interface Activity {
@@ -92,32 +88,11 @@ export default function RightSidebar({
 
   const agentsQuery = useQuery(api.agents.list);
   const activitiesQuery = useQuery(api.activities.recent, { limit: 220 });
-  const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
+  const documentsQuery = useQuery(api.documents.listAll, {
+    type: selectedDocumentType === "all" ? undefined : (selectedDocumentType as DocumentKind),
+  });
 
   const agents = useMemo(() => (agentsQuery ?? []) as Agent[], [agentsQuery]);
-  const tasks = useMemo(() => (tasksQuery ?? []) as TaskRow[], [tasksQuery]);
-  const taskIds = tasks.map((task) => task._id);
-  const taskIdsKey = taskIds.map(String).join("|");
-  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
-
-  const documentRequests = useMemo(() => {
-    const out: Record<
-      string,
-      {
-        query: typeof api.documents.listForTask;
-        args: { taskId: Id<"tasks"> };
-      }
-    > = {};
-    for (const taskId of stableTaskIds) {
-      out[`task_${taskId}`] = {
-        query: api.documents.listForTask,
-        args: { taskId },
-      };
-    }
-    return out;
-  }, [stableTaskIds]);
-
-  const documentsByTask = useQueries(documentRequests);
 
   const activities = useMemo(() => {
     const rows = ((activitiesQuery ?? []) as Activity[]).slice().reverse();
@@ -129,21 +104,13 @@ export default function RightSidebar({
   }, [activitiesQuery, selectedFeedType, selectedAgentId]);
 
   const documents = useMemo(() => {
-    const rows: DocumentRow[] = [];
-    for (const taskId of stableTaskIds) {
-      const key = `task_${taskId}`;
-      const result = documentsByTask[key];
-      if (Array.isArray(result)) {
-        for (const row of result as DocumentRow[]) {
-          rows.push({
-            ...row,
-            createdBy: row.createdBy || "Unknown",
-          });
-        }
-      }
-    }
-    return rows.sort((a, b) => b.createdAt - a.createdAt);
-  }, [documentsByTask, stableTaskIds]);
+    return ((documentsQuery ?? []) as DocumentRow[])
+      .map((row) => ({
+        ...row,
+        createdBy: row.createdBy || "Unknown",
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [documentsQuery]);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent._id === selectedAgentId),
@@ -158,9 +125,7 @@ export default function RightSidebar({
     });
   }, [documents, selectedAgent, selectedDocumentType]);
 
-  const documentsLoading =
-    tasksQuery === undefined ||
-    Object.values(documentsByTask).some((row) => row === undefined);
+  const documentsLoading = documentsQuery === undefined;
 
   return (
     <aside

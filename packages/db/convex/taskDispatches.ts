@@ -9,6 +9,159 @@ const dispatchStatus = v.union(
   v.literal("cancelled")
 );
 
+function requiresPlanningApproval(task: {
+  planningStatus?: "none" | "questions" | "ready" | "approved";
+}) {
+  return task.planningStatus === "questions" || task.planningStatus === "ready";
+}
+
+function targetKey(targetAgentId?: string | null) {
+  return targetAgentId ?? "__default";
+}
+
+function truncate(value: string, max = 5000) {
+  const compact = value.trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(0, max - 3))}...`;
+}
+
+async function insertAgentNotification(
+  ctx: any,
+  targetAgentId: string,
+  content: string,
+  sourceTaskId?: string
+) {
+  const now = Date.now();
+  await ctx.db.insert("notifications", {
+    targetAgentId,
+    content,
+    sourceTaskId,
+    sourceMessageId: undefined,
+    delivered: false,
+    deliveredAt: undefined,
+    error: undefined,
+    attempts: 0,
+    claimedBy: undefined,
+    claimedAt: undefined,
+    createdAt: now,
+  });
+}
+
+async function claimDispatchRow(
+  ctx: any,
+  row: any,
+  runnerId: string
+) {
+  const now = Date.now();
+  const task = await ctx.db.get(row.taskId);
+  if (!task) {
+    await ctx.db.patch(row._id, {
+      status: "failed",
+      error: "Task not found",
+      finishedAt: now,
+    });
+    return null;
+  }
+
+  if (task.status === "archived") {
+    await ctx.db.patch(row._id, {
+      status: "cancelled",
+      error: "Task archived before dispatch",
+      finishedAt: now,
+    });
+    return null;
+  }
+
+  if (requiresPlanningApproval(task)) {
+    await ctx.db.patch(row._id, {
+      status: "cancelled",
+      error: "Planning must be approved before dispatch",
+      finishedAt: now,
+    });
+    return null;
+  }
+
+  let selectedAgentId =
+    row.targetAgentId ??
+    (task.assigneeIds?.length ? task.assigneeIds[0] : undefined);
+  let selectedAgent = selectedAgentId ? await ctx.db.get(selectedAgentId) : null;
+
+  if (!selectedAgent) {
+    selectedAgent =
+      (await ctx.db
+        .query("agents")
+        .withIndex("by_name", (q: any) => q.eq("name", "Motoko"))
+        .first()) ?? null;
+    selectedAgentId = selectedAgent?._id;
+  }
+
+  if (!selectedAgent || !selectedAgent.sessionKey) {
+    await ctx.db.patch(row._id, {
+      status: "failed",
+      error: "No target agent session available",
+      finishedAt: now,
+    });
+    await ctx.db.insert("activities", {
+      type: "dispatch_completed",
+      taskId: task._id,
+      message: `Dispatch failed for "${task.title}" (no target agent session)`,
+      createdAt: now,
+    });
+    return null;
+  }
+
+  await ctx.db.patch(row._id, {
+    status: "running",
+    runner: runnerId,
+    startedAt: now,
+    finishedAt: undefined,
+    error: undefined,
+  });
+
+  if (task.status !== "archived") {
+    await ctx.db.patch(task._id, {
+      status: "in_progress",
+      startedAt: task.startedAt ?? now,
+      completedAt: undefined,
+      updatedAt: now,
+    });
+  }
+
+  await ctx.db.insert("activities", {
+    type: "dispatch_started",
+    taskId: task._id,
+    agentId: selectedAgentId,
+    message: `Dispatch started: ${selectedAgent.name}`,
+    createdAt: now,
+  });
+
+  const thread = await ctx.db
+    .query("messages")
+    .withIndex("by_taskId", (q: any) => q.eq("taskId", task._id))
+    .order("desc")
+    .take(8);
+  const threadMessages = [...thread]
+    .reverse()
+    .map((msg) => ({
+      fromUser: Boolean(msg.fromUser),
+      text: (msg.content ?? "").trim(),
+    }))
+    .filter((msg) => msg.text.length > 0);
+
+  return {
+    dispatchId: row._id,
+    taskId: row.taskId,
+    prompt: row.prompt ?? null,
+    targetAgentId: selectedAgentId ?? null,
+    targetSessionKey: selectedAgent.sessionKey ?? null,
+    taskTitle: task.title ?? null,
+    taskDescription: task.description ?? null,
+    taskPriority: task.priority ?? "medium",
+    taskTags: task.tags ?? [],
+    threadMessages,
+  };
+}
+
 export const hasPending = query({
   args: {},
   handler: async (ctx) => {
@@ -30,36 +183,138 @@ export const enqueue = mutation({
     idempotencyKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const now = Date.now();
-
-    if (args.idempotencyKey) {
-      const existing = await ctx.db
-        .query("taskDispatches")
-        .withIndex("by_idempotencyKey", (q) =>
-          q.eq("idempotencyKey", args.idempotencyKey!)
-        )
-        .first();
-      if (existing) return existing._id;
+    const task = await ctx.db.get(args.taskId);
+    if (!task) {
+      throw new Error("Task not found");
+    }
+    if (task.status === "archived") {
+      throw new Error("Cannot dispatch an archived task");
+    }
+    if (requiresPlanningApproval(task)) {
+      throw new Error("Planning must be approved before dispatch");
     }
 
-    return await ctx.db.insert("taskDispatches", {
-      taskId: args.taskId,
-      targetAgentId: args.targetAgentId,
-      requestedBy: args.requestedBy,
-      prompt: args.prompt,
-      idempotencyKey: args.idempotencyKey,
-      status: "pending",
-      runner: undefined,
-      runId: undefined,
-      resultPreview: undefined,
-      verificationStatus: "not_run",
-      verificationSummary: undefined,
-      verificationCommand: undefined,
-      error: undefined,
-      requestedAt: now,
-      startedAt: undefined,
-      finishedAt: undefined,
-    });
+    if (args.targetAgentId) {
+      const target = await ctx.db.get(args.targetAgentId);
+      if (!target) throw new Error("Target agent not found");
+    }
+
+    const now = Date.now();
+    const requestedBy = args.requestedBy.trim() || "Mission Control";
+    const normalizedPrompt = args.prompt?.trim() || undefined;
+    const normalizedIdempotencyKey = args.idempotencyKey?.trim() || undefined;
+
+    const targetIds = args.targetAgentId
+      ? [args.targetAgentId]
+      : task.assigneeIds.length > 0
+        ? [...task.assigneeIds]
+        : [undefined];
+
+    const dedupTargets: Array<string | undefined> = [];
+    const seenTargets = new Set<string>();
+    for (const targetId of targetIds) {
+      const key = targetKey(targetId as string | undefined);
+      if (seenTargets.has(key)) continue;
+      seenTargets.add(key);
+      dedupTargets.push(targetId as string | undefined);
+    }
+
+    const existingRows = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+      .collect();
+
+    const activeByTarget = new Map<string, string>();
+    for (const row of existingRows) {
+      if (row.status !== "pending" && row.status !== "running") continue;
+      activeByTarget.set(targetKey(row.targetAgentId as string | undefined), row._id as string);
+    }
+
+    const createdIds: string[] = [];
+    const reusedIds: string[] = [];
+
+    for (const targetId of dedupTargets) {
+      const key = targetKey(targetId);
+      const active = activeByTarget.get(key);
+      if (active) {
+        reusedIds.push(active);
+        continue;
+      }
+
+      const perTargetIdempotencyKey = normalizedIdempotencyKey
+        ? `${normalizedIdempotencyKey}:${targetId ?? "default"}`
+        : undefined;
+
+      if (perTargetIdempotencyKey) {
+        const existingByKey = await ctx.db
+          .query("taskDispatches")
+          .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", perTargetIdempotencyKey))
+          .first();
+        if (existingByKey) {
+          reusedIds.push(existingByKey._id as string);
+          continue;
+        }
+      }
+
+      const createdId = await ctx.db.insert("taskDispatches", {
+        taskId: args.taskId,
+        targetAgentId: targetId as any,
+        requestedBy,
+        prompt: normalizedPrompt,
+        idempotencyKey: perTargetIdempotencyKey,
+        status: "pending",
+        runner: undefined,
+        runId: undefined,
+        resultPreview: undefined,
+        verificationStatus: "not_run",
+        verificationSummary: undefined,
+        verificationCommand: undefined,
+        error: undefined,
+        requestedAt: now,
+        startedAt: undefined,
+        finishedAt: undefined,
+      });
+      createdIds.push(createdId as string);
+    }
+
+    const dispatchId = createdIds[0] ?? reusedIds[0];
+    if (!dispatchId) {
+      throw new Error("No dispatch lane was queued");
+    }
+
+    if (createdIds.length > 0) {
+      await ctx.db.patch(task._id, {
+        status: "in_progress",
+        startedAt: task.startedAt ?? now,
+        completedAt: undefined,
+        updatedAt: now,
+      });
+
+      if (normalizedPrompt) {
+        await ctx.db.insert("messages", {
+          taskId: task._id,
+          fromAgentId: undefined,
+          fromUser: true,
+          content: normalizedPrompt,
+          mentions: [],
+          channel: `task:${task._id}`,
+          metadata: undefined,
+          createdAt: now,
+        });
+      }
+
+      await ctx.db.insert("activities", {
+        type: "dispatch_started",
+        taskId: task._id,
+        message:
+          dedupTargets.length > 1
+            ? `Dispatch queued for "${task.title}" (${createdIds.length}/${dedupTargets.length} lanes queued)`
+            : `Dispatch queued for "${task.title}"`,
+        createdAt: now,
+      });
+    }
+
+    return dispatchId as any;
   },
 });
 
@@ -68,52 +323,19 @@ export const claimNext = mutation({
     runnerId: v.string(),
   },
   handler: async (ctx, args) => {
-    const next = await ctx.db
+    const pending = await ctx.db
       .query("taskDispatches")
       .withIndex("by_status_requestedAt", (q) => q.eq("status", "pending"))
       .order("asc")
-      .first();
+      .take(20);
+    if (pending.length === 0) return null;
 
-    if (!next) return null;
-
-    const now = Date.now();
-    await ctx.db.patch(next._id, {
-      status: "running",
-      runner: args.runnerId,
-      startedAt: now,
-    });
-
-    const task = await ctx.db.get(next.taskId);
-    if (task && (task.status === "inbox" || task.status === "assigned")) {
-      await ctx.db.patch(task._id, {
-        status: "in_progress",
-        startedAt: task.startedAt ?? now,
-        updatedAt: now,
-      });
+    for (const row of pending) {
+      const claim = await claimDispatchRow(ctx, row, args.runnerId);
+      if (claim) return claim;
     }
 
-    const targetAgentId =
-      next.targetAgentId ??
-      (task?.assigneeIds?.length ? task.assigneeIds[0] : undefined);
-    const targetAgent = targetAgentId ? await ctx.db.get(targetAgentId) : null;
-
-    await ctx.db.insert("activities", {
-      type: "dispatch_started",
-      taskId: next.taskId,
-      agentId: targetAgentId,
-      message: `Dispatch started${targetAgent ? `: ${targetAgent.name}` : ""}`,
-      createdAt: now,
-    });
-
-    return {
-      dispatchId: next._id,
-      taskId: next.taskId,
-      prompt: next.prompt ?? null,
-      targetAgentId: targetAgentId ?? null,
-      targetSessionKey: targetAgent?.sessionKey ?? null,
-      taskTitle: task?.title ?? null,
-      taskDescription: task?.description ?? null,
-    };
+    return null;
   },
 });
 
@@ -133,45 +355,7 @@ export const claimForTask = mutation({
       .sort((a, b) => a.requestedAt - b.requestedAt)[0];
 
     if (!next) return null;
-
-    const now = Date.now();
-    await ctx.db.patch(next._id, {
-      status: "running",
-      runner: args.runnerId,
-      startedAt: now,
-    });
-
-    const task = await ctx.db.get(next.taskId);
-    if (task && (task.status === "inbox" || task.status === "assigned")) {
-      await ctx.db.patch(task._id, {
-        status: "in_progress",
-        startedAt: task.startedAt ?? now,
-        updatedAt: now,
-      });
-    }
-
-    const targetAgentId =
-      next.targetAgentId ??
-      (task?.assigneeIds?.length ? task.assigneeIds[0] : undefined);
-    const targetAgent = targetAgentId ? await ctx.db.get(targetAgentId) : null;
-
-    await ctx.db.insert("activities", {
-      type: "dispatch_started",
-      taskId: next.taskId,
-      agentId: targetAgentId,
-      message: `Dispatch started${targetAgent ? `: ${targetAgent.name}` : ""}`,
-      createdAt: now,
-    });
-
-    return {
-      dispatchId: next._id,
-      taskId: next.taskId,
-      prompt: next.prompt ?? null,
-      targetAgentId: targetAgentId ?? null,
-      targetSessionKey: targetAgent?.sessionKey ?? null,
-      taskTitle: task?.title ?? null,
-      taskDescription: task?.description ?? null,
-    };
+    return await claimDispatchRow(ctx, next, args.runnerId);
   },
 });
 
@@ -185,6 +369,7 @@ export const complete = mutation({
     const now = Date.now();
     const existing = await ctx.db.get(args.dispatchId);
     if (!existing) return;
+    const task = await ctx.db.get(existing.taskId);
 
     await ctx.db.patch(args.dispatchId, {
       status: "completed",
@@ -193,6 +378,43 @@ export const complete = mutation({
       finishedAt: now,
       error: undefined,
     });
+
+    if (task) {
+      const taskDispatches = await ctx.db
+        .query("taskDispatches")
+        .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
+        .collect();
+      const remainingActiveLanes = taskDispatches.filter(
+        (row) => row.status === "pending" || row.status === "running"
+      ).length;
+
+      if (task.status !== "archived") {
+        const nextStatus =
+          remainingActiveLanes > 0 ? "in_progress" : task.status === "done" ? "done" : "review";
+        await ctx.db.patch(task._id, {
+          status: nextStatus,
+          openclawRunId: args.runId ?? task.openclawRunId,
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.patch(task._id, {
+          openclawRunId: args.runId ?? task.openclawRunId,
+          updatedAt: now,
+        });
+      }
+
+      await ctx.db.insert("activities", {
+        type: "dispatch_completed",
+        taskId: existing.taskId,
+        agentId: existing.targetAgentId,
+        message:
+          remainingActiveLanes > 0
+            ? `Dispatch lane completed (${remainingActiveLanes} lane(s) still active)`
+            : "Dispatch completed",
+        createdAt: now,
+      });
+      return;
+    }
 
     await ctx.db.insert("activities", {
       type: "dispatch_completed",
@@ -213,19 +435,68 @@ export const fail = mutation({
     const now = Date.now();
     const existing = await ctx.db.get(args.dispatchId);
     if (!existing) return;
+    const task = await ctx.db.get(existing.taskId);
+    const errorText = truncate(args.error, 1000);
 
     await ctx.db.patch(args.dispatchId, {
       status: "failed",
-      error: args.error.slice(0, 5000),
+      error: errorText,
       finishedAt: now,
     });
+
+    if (task) {
+      const taskDispatches = await ctx.db
+        .query("taskDispatches")
+        .withIndex("by_taskId", (q) => q.eq("taskId", task._id))
+        .collect();
+      const remainingActiveLanes = taskDispatches.filter(
+        (row) => row.status === "pending" || row.status === "running"
+      ).length;
+
+      if (task.status !== "archived") {
+        await ctx.db.patch(task._id, {
+          status: remainingActiveLanes > 0 ? "in_progress" : "blocked",
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.patch(task._id, { updatedAt: now });
+      }
+
+      await ctx.db.insert("activities", {
+        type: "dispatch_completed",
+        taskId: existing.taskId,
+        agentId: existing.targetAgentId,
+        message:
+          remainingActiveLanes > 0
+            ? `Dispatch lane failed (${remainingActiveLanes} lane(s) still active)`
+            : "Dispatch failed",
+        metadata: { error: errorText },
+        createdAt: now,
+      });
+
+      if (task.status !== "archived") {
+        const notificationText =
+          remainingActiveLanes > 0
+            ? `A dispatch lane failed for "${task.title}": ${truncate(errorText, 240)}`
+            : `Dispatch failed for "${task.title}": ${truncate(errorText, 240)}`;
+        for (const assigneeId of task.assigneeIds) {
+          await insertAgentNotification(
+            ctx,
+            assigneeId as string,
+            notificationText,
+            task._id as string
+          );
+        }
+      }
+      return;
+    }
 
     await ctx.db.insert("activities", {
       type: "dispatch_completed",
       taskId: existing.taskId,
       agentId: existing.targetAgentId,
       message: "Dispatch failed",
-      metadata: { error: args.error.slice(0, 500) },
+      metadata: { error: truncate(errorText, 500) },
       createdAt: now,
     });
   },
@@ -237,7 +508,11 @@ export const cancel = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    await ctx.db.patch(args.dispatchId, {
+    const row = await ctx.db.get(args.dispatchId);
+    if (!row) return;
+    if (row.status === "completed" || row.status === "failed" || row.status === "cancelled") return;
+
+    await ctx.db.patch(row._id, {
       status: "cancelled",
       finishedAt: now,
     });
@@ -278,6 +553,14 @@ export const cancelForTask = mutation({
       message: `Cancelled ${active.length} active dispatch lane(s)`,
       createdAt: now,
     });
+
+    const task = await ctx.db.get(args.taskId);
+    if (task && task.status !== "archived" && (task.status === "in_progress" || task.status === "testing")) {
+      await ctx.db.patch(task._id, {
+        status: "review",
+        updatedAt: now,
+      });
+    }
 
     return { cancelled: active.length };
   },

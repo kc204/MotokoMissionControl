@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQueries, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
 
@@ -21,15 +21,31 @@ interface TaskRow {
   status: "inbox" | "assigned" | "in_progress" | "testing" | "review" | "done" | "blocked" | "archived";
 }
 
-interface AgentRow {
-  _id: Id<"agents">;
-  status: "idle" | "active" | "blocked" | "offline";
-}
-
-interface DispatchRow {
-  _id: Id<"taskDispatches">;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
-  finishedAt?: number;
+interface OpsOverview {
+  now: number;
+  dispatch: {
+    pending: number;
+    running: number;
+    recent24h: {
+      completed: number;
+      failed: number;
+      cancelled: number;
+    };
+  };
+  agents: {
+    total: number;
+    active: number;
+    blocked: number;
+    idle: number;
+  };
+  notifications: {
+    undelivered: number;
+  };
+  watcher: {
+    owner: string | null;
+    expiresAt: number;
+    isHealthy: boolean;
+  };
 }
 
 const DEFAULT_CONFIG: AutomationConfig = {
@@ -64,82 +80,17 @@ function sameAutomationConfig(a: AutomationConfig, b: AutomationConfig) {
 export default function SettingsPage() {
   const settingsRowQuery = useQuery(api.settings.get, { key: "automation:config" });
   const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
-  const agentsQuery = useQuery(api.agents.list);
-  const notificationsQuery = useQuery(api.notifications.getUndelivered, { limit: 500 });
-  const watcherLeaseQuery = useQuery(api.settings.get, { key: "watcher:leader" });
+  const opsQuery = useQuery(api.ops.overview);
   const updateSetting = useMutation(api.settings.set);
 
   const settingsRow = (settingsRowQuery ?? null) as { value?: unknown } | null;
   const config = ((settingsRow?.value as AutomationConfig | undefined) ?? DEFAULT_CONFIG) as AutomationConfig;
   const tasks = (tasksQuery ?? []) as TaskRow[];
-  const agents = (agentsQuery ?? []) as AgentRow[];
-  const undeliveredNotifications = (notificationsQuery ?? []) as unknown[];
-  const taskIds = tasks.map((task) => task._id);
-  const taskIdsKey = taskIds.map(String).join("|");
-  const stableTaskIds = useMemo(() => taskIds, [taskIdsKey]);
-
-  const dispatchRequests = useMemo(() => {
-    const out: Record<
-      string,
-      { query: typeof api.taskDispatches.listForTask; args: { taskId: Id<"tasks">; limit: number } }
-    > = {};
-    for (const taskId of stableTaskIds) {
-      out[`task_${taskId}`] = {
-        query: api.taskDispatches.listForTask,
-        args: { taskId, limit: 40 },
-      };
-    }
-    return out;
-  }, [stableTaskIds]);
-
-  const dispatchResults = useQueries(dispatchRequests);
-
-  const dispatchRows = useMemo(() => {
-    const rows: DispatchRow[] = [];
-    for (const taskId of stableTaskIds) {
-      const key = `task_${taskId}`;
-      const result = dispatchResults[key];
-      if (Array.isArray(result)) {
-        rows.push(...(result as DispatchRow[]));
-      }
-    }
-    return rows;
-  }, [dispatchResults, stableTaskIds]);
-
-  const opsLoading =
-    tasksQuery === undefined ||
-    agentsQuery === undefined ||
-    notificationsQuery === undefined ||
-    watcherLeaseQuery === undefined ||
-    Object.values(dispatchResults).some((row) => row === undefined);
+  const opsOverview = (opsQuery ?? null) as OpsOverview | null;
+  const opsLoading = tasksQuery === undefined || opsQuery === undefined;
 
   const ops = useMemo(() => {
-    const now = Date.now();
-    const cutoff = now - 24 * 60 * 60 * 1000;
-
-    const pending = dispatchRows.filter((row) => row.status === "pending").length;
-    const running = dispatchRows.filter((row) => row.status === "running").length;
-    const completed24h = dispatchRows.filter(
-      (row) =>
-        row.status === "completed" &&
-        typeof row.finishedAt === "number" &&
-        row.finishedAt >= cutoff
-    ).length;
-    const failed24h = dispatchRows.filter(
-      (row) =>
-        row.status === "failed" && typeof row.finishedAt === "number" && row.finishedAt >= cutoff
-    ).length;
-    const cancelled24h = dispatchRows.filter(
-      (row) =>
-        row.status === "cancelled" &&
-        typeof row.finishedAt === "number" &&
-        row.finishedAt >= cutoff
-    ).length;
-
-    const activeAgents = agents.filter((agent) => agent.status === "active").length;
-    const blockedAgents = agents.filter((agent) => agent.status === "blocked").length;
-    const idleAgents = Math.max(0, agents.length - activeAgents - blockedAgents);
-
+    const now = opsOverview?.now ?? Date.now();
     const pipeline = {
       inbox: tasks.filter((task) => task.status === "inbox").length,
       inProgress: tasks.filter((task) => task.status === "in_progress").length,
@@ -147,46 +98,34 @@ export default function SettingsPage() {
       done: tasks.filter((task) => task.status === "done").length,
     };
 
-    const leaseValue = (watcherLeaseQuery as { value?: unknown } | null)?.value as
-      | { owner?: unknown; expiresAt?: unknown }
-      | undefined;
-    const owner =
-      leaseValue && typeof leaseValue.owner === "string" && leaseValue.owner
-        ? leaseValue.owner
-        : null;
-    const expiresAt =
-      leaseValue && typeof leaseValue.expiresAt === "number" && Number.isFinite(leaseValue.expiresAt)
-        ? leaseValue.expiresAt
-        : 0;
-
     return {
       now,
       dispatch: {
-        pending,
-        running,
+        pending: opsOverview?.dispatch.pending ?? 0,
+        running: opsOverview?.dispatch.running ?? 0,
         recent24h: {
-          completed: completed24h,
-          failed: failed24h,
-          cancelled: cancelled24h,
+          completed: opsOverview?.dispatch.recent24h.completed ?? 0,
+          failed: opsOverview?.dispatch.recent24h.failed ?? 0,
+          cancelled: opsOverview?.dispatch.recent24h.cancelled ?? 0,
         },
       },
       agents: {
-        total: agents.length,
-        active: activeAgents,
-        blocked: blockedAgents,
-        idle: idleAgents,
+        total: opsOverview?.agents.total ?? 0,
+        active: opsOverview?.agents.active ?? 0,
+        blocked: opsOverview?.agents.blocked ?? 0,
+        idle: opsOverview?.agents.idle ?? 0,
       },
       pipeline,
       notifications: {
-        undelivered: undeliveredNotifications.length,
+        undelivered: opsOverview?.notifications.undelivered ?? 0,
       },
       watcher: {
-        owner,
-        expiresAt,
-        isHealthy: Boolean(owner) && expiresAt > now,
+        owner: opsOverview?.watcher.owner ?? null,
+        expiresAt: opsOverview?.watcher.expiresAt ?? 0,
+        isHealthy: Boolean(opsOverview?.watcher.owner) && (opsOverview?.watcher.expiresAt ?? 0) > now,
       },
     };
-  }, [agents, dispatchRows, tasks, undeliveredNotifications.length, watcherLeaseQuery]);
+  }, [opsOverview, tasks]);
 
   const [form, setForm] = useState<AutomationConfig>(DEFAULT_CONFIG);
   const [isDirty, setIsDirty] = useState(false);
