@@ -1,96 +1,57 @@
-# Motoko Mission Control v2 - Environment Setup
+# Motoko Mission Control v2 - Environment
 
-## Required Environment Variables
+## Required Variables
 
-### For CLI (`apps/cli/.env`)
-
-```env
-CONVEX_URL=https://elegant-chipmunk-882.convex.cloud
-```
-
-### For Web App (`apps/web/.env.local`)
+### Web (`apps/web/.env.local`)
 
 ```env
 NEXT_PUBLIC_CONVEX_URL=https://elegant-chipmunk-882.convex.cloud
 ```
 
-### For DB Package (`packages/db/.env.deploy`)
+### CLI / Runtime
+
+Set one of:
 
 ```env
-CONVEX_DEPLOY_KEY=your_deploy_key_here
+CONVEX_URL=https://elegant-chipmunk-882.convex.cloud
 ```
 
-## Deployment
+or pass `--url` to runtime start.
 
-The Convex backend is already deployed to:
-- **URL**: https://elegant-chipmunk-882.convex.cloud
+### DB Deploy (`packages/db/.env.deploy`)
 
-## CLI Commands
+```env
+CONVEX_DEPLOYMENT=elegant-chipmunk-882
+# optional if not already authenticated:
+# CONVEX_DEPLOY_KEY=...
+```
+
+## Core Commands
 
 ```bash
-# List all agents
-mmc agent list
-
-# Get agent details
-mmc agent get <name>
-
-# List tasks
-mmc task list
-
-# Get task details
-mmc task get <id>
-
-# Start the runtime
-mmc runtime start
-mmc runtime start --concurrency 5 --claim-ttl 120000
+pnpm openclaw:sync-agents
+pnpm stack:elegant
+pnpm runtime:start:elegant
+pnpm smoke:elegant
+pnpm smoke:dispatch:elegant
 ```
 
-## Web App
+## End-to-End Expectation
+
+To assign tasks and have agents execute them:
+
+1. Web UI is running (`pnpm web:dev` or `pnpm stack:elegant`).
+2. Runtime is running (`pnpm runtime:start:elegant`).
+3. OpenClaw agents are synced from Convex (`pnpm openclaw:sync-agents`).
+4. Task has assignees, then `Run / Resume Task` enqueues dispatch lanes.
+5. Runtime claims lanes and completes/fails them in `taskDispatches`.
+
+Note: `openclaw:sync-agents` can recreate existing agents if their configured model is not available locally.
+
+## Quick Health Checks
 
 ```bash
-# Start development server
-pnpm dev
-
-# Build for production
-pnpm build
-
-# Type check
-pnpm type-check
+openclaw --version
+pnpm smoke:elegant
+pnpm smoke:dispatch:elegant
 ```
-
-## Features
-
-### Dashboard
-- Real-time stats with agent/task counts
-- Activity feed
-- Quick actions
-- System status
-
-### Agents Page
-- Agent cards with avatars and status indicators
-- Search and filter by name, status, level
-- Stats overview
-
-### Tasks Page
-- Kanban board with 6 columns (Inbox → Done)
-- Drag-and-drop support (UI ready)
-- Search and filter by priority/tags
-
-### Workflows Page
-- Visual workflow builder (preview)
-- Node-based editor
-- Template gallery
-
-## Architecture
-
-- **Convex Backend**: Real-time database with 14 function modules
-- **Next.js Web App**: React + TypeScript + Tailwind CSS
-- **CLI**: Node.js + Commander.js
-- **Runtime**: WebSocket-based task dispatcher
-
-## Tech Stack
-
-- Frontend: Next.js 15, React 19, Tailwind CSS 4
-- Backend: Convex (serverless functions + real-time subscriptions)
-- CLI: Commander.js, Chalk, Ora
-- TypeScript: Strict mode enabled

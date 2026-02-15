@@ -3,6 +3,24 @@ import { api } from "@motoko/db";
 import type { DispatchClaim, NotificationClaim, RuntimeConfig } from "./runtime";
 import { OpenClawTransport, OpenClawResult } from "./openclaw";
 
+interface AutomationConfig {
+  autoDispatchEnabled: boolean;
+  notificationDeliveryEnabled: boolean;
+  notificationBatchSize: number;
+  heartbeatEnabled: boolean;
+}
+
+const WATCHER_LEASE_KEY = "watcher:leader";
+const LEASE_TTL_MS = 15_000;
+const CONFIG_REFRESH_MS = 5_000;
+
+const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
+  autoDispatchEnabled: true,
+  notificationDeliveryEnabled: true,
+  notificationBatchSize: 10,
+  heartbeatEnabled: true,
+};
+
 export class MissionControlRuntime {
   private client: ConvexHttpClient;
   private config: Required<RuntimeConfig>;
@@ -10,6 +28,12 @@ export class MissionControlRuntime {
   private activeDispatches = new Set<string>();
   private activeNotifications = new Set<string>();
   private checkInterval?: NodeJS.Timeout;
+  private tickInFlight = false;
+  private cachedAutomationConfig: AutomationConfig = DEFAULT_AUTOMATION_CONFIG;
+  private automationConfigFetchedAt = 0;
+  private lastLeaseRenewedAt = 0;
+  private leaseOwned = false;
+  private lastLeaseWarningAt = 0;
 
   constructor(config: RuntimeConfig) {
     this.config = {
@@ -18,7 +42,7 @@ export class MissionControlRuntime {
       concurrency: config.concurrency || 3,
       claimTtlMs: config.claimTtlMs || 60_000,
     };
-    
+
     this.client = new ConvexHttpClient(this.config.convexUrl);
   }
 
@@ -46,38 +70,157 @@ export class MissionControlRuntime {
    */
   stop(): void {
     if (!this.isRunning) return;
-    
+
     console.log("[MissionControlRuntime] Stopping...");
     this.isRunning = false;
-    
+
     // Clear polling interval
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = undefined;
     }
 
+    void this.releaseLease();
     console.log("[MissionControlRuntime] Stopped");
   }
 
   private startPolling(): void {
     // Poll every 2 seconds for new work
     this.checkInterval = setInterval(() => {
-      if (!this.isRunning) return;
-      
-      // Check for pending dispatches
-      if (this.activeDispatches.size < this.config.concurrency) {
-        this.processNextDispatch();
-      }
-      
-      // Check for undelivered notifications
-      if (this.activeNotifications.size < this.config.concurrency) {
-        this.processNextNotification();
-      }
+      void this.tick();
     }, 2000);
 
     // Initial check
-    this.processNextDispatch();
-    this.processNextNotification();
+    void this.tick();
+  }
+
+  private async tick(): Promise<void> {
+    if (!this.isRunning || this.tickInFlight) return;
+    this.tickInFlight = true;
+
+    try {
+      const automation = await this.getAutomationConfig();
+      await this.refreshLease(automation);
+
+      if (automation.autoDispatchEnabled && this.activeDispatches.size < this.config.concurrency) {
+        await this.processNextDispatch();
+      }
+
+      const notificationConcurrency = Math.max(
+        1,
+        Math.min(this.config.concurrency, automation.notificationBatchSize || this.config.concurrency)
+      );
+      if (
+        automation.notificationDeliveryEnabled &&
+        this.activeNotifications.size < notificationConcurrency
+      ) {
+        await this.processNextNotification();
+      }
+    } catch (error) {
+      console.error("[MissionControlRuntime] Tick failed:", error);
+    } finally {
+      this.tickInFlight = false;
+    }
+  }
+
+  private normalizeAutomationConfig(value: unknown): AutomationConfig {
+    if (!value || typeof value !== "object") {
+      return DEFAULT_AUTOMATION_CONFIG;
+    }
+
+    const raw = value as Record<string, unknown>;
+
+    const autoDispatchEnabled =
+      typeof raw.autoDispatchEnabled === "boolean"
+        ? raw.autoDispatchEnabled
+        : DEFAULT_AUTOMATION_CONFIG.autoDispatchEnabled;
+
+    const notificationDeliveryEnabled =
+      typeof raw.notificationDeliveryEnabled === "boolean"
+        ? raw.notificationDeliveryEnabled
+        : DEFAULT_AUTOMATION_CONFIG.notificationDeliveryEnabled;
+
+    const notificationBatchSize = Number.isFinite(raw.notificationBatchSize)
+      ? Math.max(1, Math.min(50, Math.round(raw.notificationBatchSize as number)))
+      : DEFAULT_AUTOMATION_CONFIG.notificationBatchSize;
+
+    const heartbeatEnabled =
+      typeof raw.heartbeatEnabled === "boolean"
+        ? raw.heartbeatEnabled
+        : DEFAULT_AUTOMATION_CONFIG.heartbeatEnabled;
+
+    return {
+      autoDispatchEnabled,
+      notificationDeliveryEnabled,
+      notificationBatchSize,
+      heartbeatEnabled,
+    };
+  }
+
+  private async getAutomationConfig(): Promise<AutomationConfig> {
+    const now = Date.now();
+    if (now - this.automationConfigFetchedAt < CONFIG_REFRESH_MS) {
+      return this.cachedAutomationConfig;
+    }
+
+    try {
+      const config = await this.client.query(api.settings.getAutomationConfig, {});
+      this.cachedAutomationConfig = this.normalizeAutomationConfig(config);
+      this.automationConfigFetchedAt = now;
+      return this.cachedAutomationConfig;
+    } catch (error) {
+      console.warn("[MissionControlRuntime] Falling back to cached automation config:", error);
+      this.automationConfigFetchedAt = now;
+      return this.cachedAutomationConfig;
+    }
+  }
+
+  private async refreshLease(automation: AutomationConfig): Promise<void> {
+    const now = Date.now();
+
+    if (!automation.heartbeatEnabled) {
+      if (this.leaseOwned) {
+        await this.releaseLease();
+      }
+      return;
+    }
+
+    if (now - this.lastLeaseRenewedAt < LEASE_TTL_MS / 2) {
+      return;
+    }
+
+    try {
+      const lease = (await this.client.mutation(api.settings.acquireLease, {
+        key: WATCHER_LEASE_KEY,
+        owner: this.config.runnerId,
+        ttlMs: LEASE_TTL_MS,
+      })) as { acquired?: boolean; owner?: string | null; expiresAt?: number };
+
+      this.lastLeaseRenewedAt = now;
+      this.leaseOwned = Boolean(lease?.acquired);
+
+      if (!lease?.acquired && now - this.lastLeaseWarningAt > 15_000) {
+        this.lastLeaseWarningAt = now;
+        console.warn(
+          `[MissionControlRuntime] watcher lease held by ${lease?.owner || "unknown"}`
+        );
+      }
+    } catch (error) {
+      console.warn("[MissionControlRuntime] Failed to refresh watcher lease:", error);
+    }
+  }
+
+  private async releaseLease(): Promise<void> {
+    try {
+      await this.client.mutation(api.settings.releaseLease, {
+        key: WATCHER_LEASE_KEY,
+        owner: this.config.runnerId,
+      });
+    } catch (error) {
+      console.warn("[MissionControlRuntime] Failed to release watcher lease:", error);
+    } finally {
+      this.leaseOwned = false;
+    }
   }
 
   private async processNextDispatch(): Promise<void> {
@@ -85,16 +228,13 @@ export class MissionControlRuntime {
     if (this.activeDispatches.size >= this.config.concurrency) return;
 
     try {
-      // Use watchQuery for reactive updates (WebSocket-based)
       const hasPending = await this.client.query(api.taskDispatches.hasPending, {});
-      
       if (!hasPending) return;
 
       // Claim the next dispatch
-      const claim = await this.client.mutation(
-        api.taskDispatches.claimNext,
-        { runnerId: this.config.runnerId }
-      ) as DispatchClaim | null;
+      const claim = (await this.client.mutation(api.taskDispatches.claimNext, {
+        runnerId: this.config.runnerId,
+      })) as DispatchClaim | null;
 
       if (!claim) return;
 
@@ -117,19 +257,14 @@ export class MissionControlRuntime {
     if (this.activeNotifications.size >= this.config.concurrency) return;
 
     try {
-      // Check for undelivered notifications
       const hasUndelivered = await this.client.query(api.notifications.hasUndelivered, {});
-      
       if (!hasUndelivered) return;
 
       // Claim the next notification
-      const claim = await this.client.mutation(
-        api.notifications.claimNext,
-        { 
-          runnerId: this.config.runnerId,
-          claimTtlMs: this.config.claimTtlMs 
-        }
-      ) as NotificationClaim | null;
+      const claim = (await this.client.mutation(api.notifications.claimNext, {
+        runnerId: this.config.runnerId,
+        claimTtlMs: this.config.claimTtlMs,
+      })) as NotificationClaim | null;
 
       if (!claim) return;
 
@@ -181,7 +316,6 @@ export class MissionControlRuntime {
         runId: result.runId,
         resultPreview: preview,
       });
-
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[Dispatch] Failed ${claim.dispatchId}:`, errorMessage);
@@ -214,7 +348,6 @@ export class MissionControlRuntime {
       await this.client.mutation(api.notifications.markDelivered, {
         id: claim.notificationId as any,
       });
-
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[Notification] Failed ${claim.notificationId}:`, errorMessage);
@@ -249,24 +382,13 @@ export class MissionControlRuntime {
     const description = claim.taskDescription || "No description provided.";
     const prompt = claim.prompt;
 
-    const parts = [
-      `Task: ${title}`,
-      "",
-      "Description:",
-      description,
-      "",
-    ];
+    const parts = [`Task: ${title}`, "", "Description:", description, ""];
 
     if (prompt) {
-      parts.push("Additional Instructions:",
-        prompt,
-        "",
-      );
+      parts.push("Additional Instructions:", prompt, "");
     }
 
-    parts.push(
-      "Please complete this task and provide a summary of what was done."
-    );
+    parts.push("Please complete this task and provide a summary of what was done.");
 
     return parts.join("\n");
   }

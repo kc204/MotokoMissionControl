@@ -1,12 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "convex/react";
+import { useQueries, useQuery } from "convex/react";
 import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
 
-type LiveFeedType = "all" | "task_created" | "task_updated" | "task_completed" | "message_sent" | "agent_status_changed" | "document_created";
+type LiveFeedType =
+  | "all"
+  | "task_created"
+  | "task_updated"
+  | "task_completed"
+  | "message_sent"
+  | "agent_status_changed"
+  | "document_created";
 type DocumentType = "all" | "deliverable" | "research" | "spec" | "note" | "markdown";
+type DocumentKind = Exclude<DocumentType, "all">;
 type TabId = "live-feed" | "documents";
 
 interface Agent {
@@ -14,18 +22,25 @@ interface Agent {
   name: string;
 }
 
+interface TaskRow {
+  _id: Id<"tasks">;
+}
+
 interface Activity {
   _id: string;
+  type?: Exclude<LiveFeedType, "all">;
+  agentId?: Id<"agents">;
   message: string;
   createdAt: number;
 }
 
-interface Document {
+interface DocumentRow {
   _id: Id<"documents">;
   title: string;
-  type: DocumentType;
-  createdBy: string;
+  type: DocumentKind;
+  createdBy?: string;
   agentId?: Id<"agents">;
+  createdAt: number;
 }
 
 const liveFeedFilters: Array<{ id: LiveFeedType; label: string }> = [
@@ -76,20 +91,56 @@ export default function RightSidebar({
   const [selectedAgentId, setSelectedAgentId] = useState<Id<"agents"> | undefined>(undefined);
 
   const agentsQuery = useQuery(api.agents.list);
-  const activitiesQuery =
-    useQuery(api.activities.listFiltered, {
-      limit: 120,
-      type: selectedFeedType === "all" ? undefined : selectedFeedType,
-      agentId: selectedAgentId,
-    });
-  const documentsQuery =
-    useQuery(api.documents.listAll, {
-      type: selectedDocumentType === "all" ? undefined : selectedDocumentType,
-    });
+  const activitiesQuery = useQuery(api.activities.recent, { limit: 220 });
+  const tasksQuery = useQuery(api.tasks.list, { limit: 250 });
 
   const agents = useMemo(() => (agentsQuery ?? []) as Agent[], [agentsQuery]);
-  const activities = useMemo(() => (activitiesQuery ?? []) as Activity[], [activitiesQuery]);
-  const documents = useMemo(() => (documentsQuery ?? []) as Document[], [documentsQuery]);
+  const tasks = useMemo(() => (tasksQuery ?? []) as TaskRow[], [tasksQuery]);
+
+  const documentRequests = useMemo(() => {
+    const out: Record<
+      string,
+      {
+        query: typeof api.documents.listForTask;
+        args: { taskId: Id<"tasks"> };
+      }
+    > = {};
+    for (const task of tasks) {
+      out[`task_${task._id}`] = {
+        query: api.documents.listForTask,
+        args: { taskId: task._id },
+      };
+    }
+    return out;
+  }, [tasks]);
+
+  const documentsByTask = useQueries(documentRequests);
+
+  const activities = useMemo(() => {
+    const rows = ((activitiesQuery ?? []) as Activity[]).slice().reverse();
+    return rows.filter((item) => {
+      if (selectedFeedType !== "all" && item.type !== selectedFeedType) return false;
+      if (selectedAgentId && String(item.agentId ?? "") !== String(selectedAgentId)) return false;
+      return true;
+    });
+  }, [activitiesQuery, selectedFeedType, selectedAgentId]);
+
+  const documents = useMemo(() => {
+    const rows: DocumentRow[] = [];
+    for (const task of tasks) {
+      const key = `task_${task._id}`;
+      const result = documentsByTask[key];
+      if (Array.isArray(result)) {
+        for (const row of result as DocumentRow[]) {
+          rows.push({
+            ...row,
+            createdBy: row.createdBy || "Unknown",
+          });
+        }
+      }
+    }
+    return rows.sort((a, b) => b.createdAt - a.createdAt);
+  }, [documentsByTask, tasks]);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent._id === selectedAgentId),
@@ -97,11 +148,16 @@ export default function RightSidebar({
   );
 
   const visibleDocuments = useMemo(() => {
-    if (!selectedAgent) return documents;
-    return documents.filter(
-      (doc) => doc.agentId === selectedAgent._id || doc.createdBy === selectedAgent.name
-    );
-  }, [documents, selectedAgent]);
+    return documents.filter((doc) => {
+      if (selectedDocumentType !== "all" && doc.type !== selectedDocumentType) return false;
+      if (!selectedAgent) return true;
+      return doc.agentId === selectedAgent._id || doc.createdBy === selectedAgent.name;
+    });
+  }, [documents, selectedAgent, selectedDocumentType]);
+
+  const documentsLoading =
+    tasksQuery === undefined ||
+    Object.values(documentsByTask).some((row) => row === undefined);
 
   return (
     <aside
@@ -218,6 +274,11 @@ export default function RightSidebar({
         </div>
       ) : (
         <div className="h-[min(68vh,760px)] space-y-2 overflow-y-auto px-3 py-3">
+          {documentsLoading && (
+            <p className="rounded-xl border border-white/10 bg-black/25 px-3 py-3 text-center text-xs text-zinc-500">
+              Loading documents...
+            </p>
+          )}
           {visibleDocuments.map((doc) => (
             <div
               key={doc._id}
@@ -246,7 +307,7 @@ export default function RightSidebar({
               </button>
             </div>
           ))}
-          {visibleDocuments.length === 0 && (
+          {!documentsLoading && visibleDocuments.length === 0 && (
             <p className="rounded-xl border border-dashed border-white/10 bg-black/25 px-3 py-5 text-center text-xs text-zinc-500">
               No documents for the selected filters.
             </p>
@@ -256,3 +317,4 @@ export default function RightSidebar({
     </aside>
   );
 }
+

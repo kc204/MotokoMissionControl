@@ -1,8 +1,7 @@
 "use client";
 
-import { useQuery } from "convex/react";
-import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
+import { useDocumentContextFallback } from "@/lib/useDocumentContextFallback";
 
 function timeAgo(ts: number) {
   const delta = Date.now() - ts;
@@ -13,25 +12,6 @@ function timeAgo(ts: number) {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   return `${d}d ago`;
-}
-
-interface ConversationMessage {
-  _id: string;
-  content: string;
-  createdAt: number;
-  agentName: string | null;
-  fromUser: boolean;
-}
-
-interface DocumentContext {
-  title: string;
-  type: string;
-  createdBy: string;
-  createdAt: number;
-  taskTitle?: string;
-  taskDescription?: string;
-  originMessage?: string;
-  conversationMessages: ConversationMessage[];
 }
 
 interface DocumentConversationTrayProps {
@@ -45,10 +25,9 @@ export default function DocumentConversationTray({
   onClose,
   onOpenPreview,
 }: DocumentConversationTrayProps) {
-  const contextQuery = useQuery(api.documents.getWithContext, { id: documentId });
-  const context = contextQuery as DocumentContext | undefined;
+  const { context, isLoading } = useDocumentContextFallback(documentId);
 
-  if (!context) {
+  if (isLoading || !context) {
     return (
       <aside className="fixed inset-y-0 right-0 z-[95] w-full max-w-md border-l border-white/10 bg-[linear-gradient(180deg,rgba(10,16,26,0.98),rgba(7,11,18,0.98))] shadow-2xl" />
     );

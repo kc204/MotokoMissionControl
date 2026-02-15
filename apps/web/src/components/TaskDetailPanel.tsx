@@ -16,6 +16,7 @@ type TaskStatus =
   | "archived";
 
 type TaskPriority = "low" | "medium" | "high" | "urgent";
+type DocumentType = "deliverable" | "research" | "spec" | "note" | "markdown";
 
 interface Task {
   _id: Id<"tasks">;
@@ -32,6 +33,13 @@ interface Agent {
   name: string;
 }
 
+interface Document {
+  _id: Id<"documents">;
+  title: string;
+  type: DocumentType;
+  content: string;
+}
+
 interface TaskMessage {
   _id: string;
   content: string;
@@ -46,6 +54,12 @@ interface Activity {
   taskId?: Id<"tasks">;
   message: string;
   createdAt: number;
+}
+
+interface TaskDispatch {
+  _id: Id<"taskDispatches">;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  requestedAt: number;
 }
 
 const STATUS_OPTIONS: Array<{ value: TaskStatus; label: string }> = [
@@ -66,6 +80,14 @@ const PRIORITY_OPTIONS: Array<{ value: TaskPriority; label: string }> = [
   { value: "urgent", label: "Urgent" },
 ];
 
+const DOC_TYPES: Array<{ value: DocumentType; label: string }> = [
+  { value: "deliverable", label: "Deliverable" },
+  { value: "research", label: "Research" },
+  { value: "spec", label: "Spec" },
+  { value: "note", label: "Note" },
+  { value: "markdown", label: "Markdown" },
+];
+
 function timeAgo(ts: number) {
   const delta = Date.now() - ts;
   const m = Math.floor(delta / 60000);
@@ -80,22 +102,34 @@ function timeAgo(ts: number) {
 interface TaskDetailPanelProps {
   taskId: Id<"tasks"> | null;
   onClose: () => void;
+  onPreviewDocument?: (id: Id<"documents">) => void;
 }
 
 export default function TaskDetailPanel({
   taskId,
   onClose,
+  onPreviewDocument,
 }: TaskDetailPanelProps) {
   const taskQuery = useQuery(api.tasks.get, taskId ? { id: taskId } : "skip");
   const agentsQuery = useQuery(api.agents.list);
+  const docsQuery = useQuery(api.documents.listForTask, taskId ? { taskId } : "skip");
+  const dispatchesQuery = useQuery(
+    api.taskDispatches.listForTask,
+    taskId ? { taskId, limit: 40 } : "skip"
+  );
   const messagesQuery = useQuery(api.messages.list, taskId ? { channel: `task:${taskId}` } : "skip");
   const activitiesQuery = useQuery(api.activities.recent, { limit: 300 });
 
   const updateTask = useMutation(api.tasks.update);
+  const enqueueDispatch = useMutation(api.taskDispatches.enqueue);
+  const cancelDispatch = useMutation(api.taskDispatches.cancel);
   const sendMessage = useMutation(api.messages.send);
+  const createDocument = useMutation(api.documents.create);
 
   const task = (taskQuery ?? null) as Task | null;
   const agents = ((agentsQuery ?? []) as Agent[]).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const docs = (docsQuery ?? []) as Document[];
+  const dispatches = (dispatchesQuery ?? []) as TaskDispatch[];
   const messages = (messagesQuery ?? []) as TaskMessage[];
   const activities = useMemo(() => {
     if (!taskId) return [] as Activity[];
@@ -115,13 +149,24 @@ export default function TaskDetailPanel({
   const [tagInput, setTagInput] = useState("");
 
   const [comment, setComment] = useState("");
+  const [dispatchPrompt, setDispatchPrompt] = useState("");
+  const [docTitle, setDocTitle] = useState("");
+  const [docContent, setDocContent] = useState("");
+  const [docType, setDocType] = useState<DocumentType>("note");
 
   const [isSaving, setIsSaving] = useState(false);
+  const [isDispatching, setIsDispatching] = useState(false);
+  const [isStoppingDispatch, setIsStoppingDispatch] = useState(false);
 
   const sortedMessages = useMemo(
     () => [...messages].sort((a, b) => a.createdAt - b.createdAt),
     [messages]
   );
+  const dispatchState = useMemo(() => {
+    const active = dispatches.find((row) => row.status === "running" || row.status === "pending");
+    if (!active) return "idle";
+    return active.status;
+  }, [dispatches]);
 
   useEffect(() => {
     if (!task) return;
@@ -183,6 +228,68 @@ export default function TaskDetailPanel({
       fromUser: true,
     });
     setComment("");
+  };
+
+  const runDispatch = async () => {
+    setIsDispatching(true);
+    try {
+      await enqueueDispatch({
+        taskId: task._id,
+        requestedBy: "Mission Control",
+        prompt: dispatchPrompt.trim() || undefined,
+      });
+      if (task.status === "inbox" || task.status === "assigned") {
+        await updateTask({
+          id: task._id,
+          status: "in_progress",
+        });
+      }
+      setDispatchPrompt("");
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
+  const stopDispatch = async () => {
+    const activeDispatches = dispatches.filter(
+      (row) => row.status === "pending" || row.status === "running"
+    );
+    if (activeDispatches.length === 0) return;
+
+    setIsStoppingDispatch(true);
+    try {
+      await Promise.all(
+        activeDispatches.map((dispatch) =>
+          cancelDispatch({
+            dispatchId: dispatch._id,
+          })
+        )
+      );
+
+      if (task.status === "in_progress" || task.status === "testing") {
+        await updateTask({
+          id: task._id,
+          status: "review",
+        });
+      }
+    } finally {
+      setIsStoppingDispatch(false);
+    }
+  };
+
+  const addDocument = async () => {
+    const nextTitle = docTitle.trim();
+    if (!nextTitle) return;
+    await createDocument({
+      title: nextTitle,
+      content: docContent.trim(),
+      type: docType,
+      taskId: task._id,
+      createdBy: "Mission Control",
+    });
+    setDocTitle("");
+    setDocContent("");
+    setDocType("note");
   };
 
   return (
@@ -333,22 +440,114 @@ export default function TaskDetailPanel({
                 Agent Dispatch
               </p>
               <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-zinc-400">
-                Unavailable
+                {dispatchState === "running" ? "Running" : dispatchState === "pending" ? "Queued" : "Idle"}
               </span>
             </div>
-            <p className="rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-zinc-400">
-              Dispatch controls are unavailable on this deployment version.
-            </p>
+            <textarea
+              value={dispatchPrompt}
+              onChange={(e) => setDispatchPrompt(e.target.value)}
+              placeholder="Optional instruction for this run..."
+              className="h-16 w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={runDispatch}
+                disabled={
+                  isDispatching ||
+                  isStoppingDispatch ||
+                  dispatchState === "pending" ||
+                  dispatchState === "running"
+                }
+                className="rounded-lg border border-emerald-300/30 bg-emerald-500/15 px-3 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
+              >
+                {dispatchState === "running"
+                  ? "Running..."
+                  : dispatchState === "pending"
+                    ? "Queued..."
+                    : isDispatching
+                      ? "Queueing..."
+                      : "Run / Resume Task"}
+              </button>
+              {(dispatchState === "pending" || dispatchState === "running") && (
+                <button
+                  type="button"
+                  onClick={stopDispatch}
+                  disabled={isStoppingDispatch}
+                  className="rounded-lg border border-rose-300/30 bg-rose-500/15 px-3 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/25 disabled:opacity-60"
+                >
+                  {isStoppingDispatch ? "Stopping..." : "Stop Run"}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="rounded-xl border border-white/10 bg-black/25 p-3">
             <div className="mb-2 flex items-center justify-between">
               <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Resources</p>
-              <span className="text-xs text-zinc-500">Unavailable</span>
+              <span className="text-xs text-zinc-500">{docs.length}</span>
             </div>
-            <p className="rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-zinc-400">
-              Resource browsing is unavailable on this deployment version.
-            </p>
+            <div className="space-y-2">
+              {docs.map((doc) =>
+                onPreviewDocument ? (
+                  <button
+                    key={doc._id}
+                    type="button"
+                    onClick={() => onPreviewDocument(doc._id)}
+                    className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-left hover:bg-white/[0.06]"
+                  >
+                    <p className="text-sm text-zinc-200">{doc.title}</p>
+                    <p className="text-xs text-zinc-500">{doc.type}</p>
+                  </button>
+                ) : (
+                  <div
+                    key={doc._id}
+                    className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-left"
+                  >
+                    <p className="text-sm text-zinc-200">{doc.title}</p>
+                    <p className="text-xs text-zinc-500">{doc.type}</p>
+                  </div>
+                )
+              )}
+              {docs.length === 0 && <p className="text-xs text-zinc-500">No resources yet.</p>}
+            </div>
+
+            <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
+              <input
+                value={docTitle}
+                onChange={(e) => setDocTitle(e.target.value)}
+                placeholder="New resource title"
+                className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+              />
+              <div className="grid grid-cols-[1fr_140px] gap-2">
+                <textarea
+                  value={docContent}
+                  onChange={(e) => setDocContent(e.target.value)}
+                  placeholder="Resource content"
+                  className="h-20 rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+                />
+                <div className="space-y-2">
+                  <select
+                    value={docType}
+                    onChange={(e) => setDocType(e.target.value as DocumentType)}
+                    className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm text-zinc-100"
+                  >
+                    {DOC_TYPES.map((type) => (
+                      <option key={type.value} value={type.value}>
+                        {type.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={addDocument}
+                    className="w-full rounded-lg border border-emerald-300/30 bg-emerald-500/15 px-3 py-2 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="rounded-xl border border-white/10 bg-black/25 p-3">

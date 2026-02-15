@@ -1,8 +1,7 @@
 "use client";
 
-import { useQuery } from "convex/react";
-import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
+import { useDocumentContextFallback } from "@/lib/useDocumentContextFallback";
 
 function typeAccent(type: "deliverable" | "research" | "spec" | "note" | "markdown") {
   if (type === "deliverable") return "border-emerald-300/30 bg-emerald-500/15 text-emerald-200";
@@ -23,9 +22,9 @@ export default function DocumentPreviewTray({
   onClose,
   withConversationOpen = false,
 }: DocumentPreviewTrayProps) {
-  const context = useQuery(api.documents.getWithContext, { id: documentId });
+  const { context, isLoading } = useDocumentContextFallback(documentId);
 
-  if (!context) {
+  if (isLoading || !context) {
     return (
       <aside className="fixed inset-y-0 right-0 z-[96] w-full max-w-lg border-l border-white/10 bg-[linear-gradient(180deg,rgba(10,16,26,0.98),rgba(7,11,18,0.98))] shadow-2xl md:right-[min(100%,24rem)]" />
     );

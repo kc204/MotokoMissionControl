@@ -1,115 +1,94 @@
 # Motoko Mission Control v2
 
-Next-generation AI agent orchestration platform — rebuilt as a modern monorepo.
+Next-generation AI agent orchestration platform in a pnpm monorepo.
 
-## Architecture
+## Repo Layout
 
-```
+```text
 motoko-mission-control/
-├── apps/
-│   ├── web/              # Next.js 15 dashboard
-│   └── cli/              # Command-line tool (mmc)
-├── packages/
-│   ├── core/             # Shared types, utilities, constants
-│   ├── db/               # Convex schema & database client
-│   ├── ui/               # Design system components
-│   ├── agents/           # Agent runtime, squads, dispatch
-│   ├── analytics/        # Metrics, telemetry, reports
-│   └── integrations/     # Webhooks, connectors
-├── tooling/
-│   ├── eslint-config/    # Shared ESLint config
-│   └── typescript-config/# Shared TS config
-└── _legacy/              # Original codebase (reference)
+|- apps/
+|  |- web/            # Next.js dashboard
+|  `- cli/            # mmc CLI
+|- packages/
+|  |- db/             # Convex schema + functions
+|  |- agents/         # Unified runtime (dispatch + notifications)
+|  |- core/
+|  |- ui/
+|  |- analytics/
+|  `- integrations/
+|- tooling/
+`- _legacy/           # Reference implementation
 ```
 
-> **Note:** The `_legacy/` folder contains the original v1 codebase. It's kept for reference when **explicitly requested** by KC. AI coding models should NOT check this folder unless KC asks for a feature to be ported from legacy.
+## Prerequisites
 
-## Quick Start
-
-### Prerequisites
 - Node.js 20+
-- pnpm (via corepack)
+- pnpm (`corepack enable`)
+- OpenClaw installed and available on PATH (`openclaw --version`)
 
-### Setup
+## Setup
 
 ```bash
-# Enable pnpm
-corepack enable
-
-# Install dependencies
 pnpm install
-
-# Start development (all apps)
-pnpm dev
-
-# Or start specific apps
-pnpm web dev      # Web dashboard
-pnpm cli dev      # CLI build
-```
-
-### Build
-
-```bash
-# Build all packages
-pnpm build
-
-# Type check
-pnpm type-check
-
-# Lint
-pnpm lint
-```
-
-## Features
-
-### v2 Additions
-- **Squad System** — Group agents with shared memory/context
-- **Workflow Engine** — Visual workflow builder (planned)
-- **Analytics Dashboard** — Performance metrics & reporting
-- **Integration Hub** — Webhooks & service connectors
-- **CLI Tool** — `mmc` command for dev workflows
-
-### Core Capabilities
-- Agent management & orchestration
-- Task pipeline (kanban board)
-- Real-time chat & collaboration
-- Knowledge base with RAG (planned)
-- OpenClaw integration
-
-## Tech Stack
-
-- **Frontend**: Next.js 15, React 19, Tailwind v4
-- **Backend**: Convex (serverless database + real-time)
-- **Monorepo**: pnpm workspaces, Turborepo
-- **CLI**: Commander.js
-
-## CLI Commands
-
-```bash
-mmc dev           # Start dev server
-mmc build         # Build all packages
-mmc agent list    # List agents
-mmc deploy        # Deploy to production
 ```
 
 ## Development
 
-### Adding a Package
+### Local Convex + Web
 
-1. Create `packages/<name>/package.json`
-2. Add source files in `src/`
-3. Export from `src/index.ts`
-4. Add to workspace dependencies as needed
-
-### Database Schema
-
-Located in `packages/db/convex/schema.ts`
-
-Run Convex dev server:
 ```bash
-pnpm db:dev
+pnpm start
 ```
 
-## License
+### Elegant Deployment + Web + Runtime
 
-MIT
+```bash
+pnpm openclaw:sync-agents
+pnpm stack:elegant
+```
+
+This is the easiest way to ensure queued task dispatches are actually processed by agents.
+`openclaw:sync-agents` reconciles missing agents and can recreate mismatched-model agents with a valid local model.
+
+## Runtime
+
+The unified runtime replaces legacy watcher/dispatch/notification daemons.
+
+```bash
+pnpm runtime:start
+pnpm runtime:start:elegant
+```
+
+Runtime behavior:
+- Claims pending task dispatches and executes OpenClaw runs.
+- Claims undelivered notifications and forwards them to agent sessions.
+- Honors `settings.getAutomationConfig` flags.
+- Publishes the `watcher:leader` lease heartbeat for ops health.
+
+## Validation
+
+```bash
+pnpm --filter @motoko/web type-check
+pnpm --filter @motoko/web lint
+pnpm --filter @motoko/web build
+pnpm smoke:elegant
+pnpm smoke:dispatch:elegant
+```
+
+## Convex
+
+```bash
+pnpm db:dev
+pnpm db:deploy
+pnpm db:seed
+```
+
+## Useful CLI
+
+```bash
+pnpm --filter @motoko/cli build
+node apps/cli/dist/index.js agent list
+node apps/cli/dist/index.js task list
+node apps/cli/dist/index.js runtime sync-agents --url https://elegant-chipmunk-882.convex.cloud
+node apps/cli/dist/index.js runtime start --url https://elegant-chipmunk-882.convex.cloud
+```

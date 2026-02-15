@@ -117,6 +117,64 @@ export const claimNext = mutation({
   },
 });
 
+export const claimForTask = mutation({
+  args: {
+    runnerId: v.string(),
+    taskId: v.id("tasks"),
+  },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("taskDispatches")
+      .withIndex("by_taskId", (q) => q.eq("taskId", args.taskId))
+      .collect();
+
+    const next = rows
+      .filter((row) => row.status === "pending")
+      .sort((a, b) => a.requestedAt - b.requestedAt)[0];
+
+    if (!next) return null;
+
+    const now = Date.now();
+    await ctx.db.patch(next._id, {
+      status: "running",
+      runner: args.runnerId,
+      startedAt: now,
+    });
+
+    const task = await ctx.db.get(next.taskId);
+    if (task && (task.status === "inbox" || task.status === "assigned")) {
+      await ctx.db.patch(task._id, {
+        status: "in_progress",
+        startedAt: task.startedAt ?? now,
+        updatedAt: now,
+      });
+    }
+
+    const targetAgentId =
+      next.targetAgentId ??
+      (task?.assigneeIds?.length ? task.assigneeIds[0] : undefined);
+    const targetAgent = targetAgentId ? await ctx.db.get(targetAgentId) : null;
+
+    await ctx.db.insert("activities", {
+      type: "dispatch_started",
+      taskId: next.taskId,
+      agentId: targetAgentId,
+      message: `Dispatch started${targetAgent ? `: ${targetAgent.name}` : ""}`,
+      createdAt: now,
+    });
+
+    return {
+      dispatchId: next._id,
+      taskId: next.taskId,
+      prompt: next.prompt ?? null,
+      targetAgentId: targetAgentId ?? null,
+      targetSessionKey: targetAgent?.sessionKey ?? null,
+      taskTitle: task?.title ?? null,
+      taskDescription: task?.description ?? null,
+    };
+  },
+});
+
 export const complete = mutation({
   args: {
     dispatchId: v.id("taskDispatches"),

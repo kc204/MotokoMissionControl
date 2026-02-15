@@ -6,6 +6,9 @@ import { api } from "@motoko/db";
 import type { Id } from "@motoko/db";
 import AddTaskModal from "@/components/AddTaskModal";
 import TaskDetailPanel from "@/components/TaskDetailPanel";
+import RightSidebar from "@/components/RightSidebar";
+import DocumentConversationTray from "@/components/DocumentConversationTray";
+import DocumentPreviewTray from "@/components/DocumentPreviewTray";
 
 type TaskStatus =
   | "inbox"
@@ -77,6 +80,9 @@ export default function TasksPage() {
   const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<Id<"tasks"> | null>(null);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<Id<"documents"> | null>(null);
+  const [showConversationTray, setShowConversationTray] = useState(false);
+  const [showPreviewTray, setShowPreviewTray] = useState(false);
 
   const allTags = useMemo(() => {
     const tags = new Set<string>();
@@ -118,6 +124,24 @@ export default function TasksPage() {
 
   const moveTaskToStatus = async (taskId: Id<"tasks">, status: TaskStatus) => {
     await updateTask({ id: taskId, status });
+  };
+
+  const selectDocument = (id: Id<"documents"> | null) => {
+    if (!id) {
+      setSelectedDocumentId(null);
+      setShowConversationTray(false);
+      setShowPreviewTray(false);
+      return;
+    }
+    setSelectedDocumentId(id);
+    setShowConversationTray(true);
+    setShowPreviewTray(true);
+  };
+
+  const previewDocument = (id: Id<"documents">) => {
+    setSelectedDocumentId(id);
+    setShowConversationTray(true);
+    setShowPreviewTray(true);
   };
 
   return (
@@ -228,103 +252,112 @@ export default function TasksPage() {
           Showing {filteredTasks.length} of {tasks.length} tasks
         </div>
 
-        <section className="overflow-x-auto pb-4">
-          <div className="flex min-w-max gap-5">
-            {columns.map((column) => {
-              const columnTasks = tasksByStatus[column.id as TaskStatus] || [];
-              return (
-                <div key={column.id} className="w-[310px]">
-                  <header className="mb-2 flex items-center justify-between px-1">
-                    <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
-                      {column.label}
-                    </h3>
-                    <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-xs text-zinc-400">
-                      {columnTasks.length}
-                    </span>
-                  </header>
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <section className="overflow-x-auto pb-4">
+            <div className="flex min-w-max gap-5">
+              {columns.map((column) => {
+                const columnTasks = tasksByStatus[column.id as TaskStatus] || [];
+                return (
+                  <div key={column.id} className="w-[310px]">
+                    <header className="mb-2 flex items-center justify-between px-1">
+                      <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
+                        {column.label}
+                      </h3>
+                      <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-xs text-zinc-400">
+                        {columnTasks.length}
+                      </span>
+                    </header>
 
-                  <div
-                    className={`relative min-h-[50vh] overflow-y-auto rounded-2xl border border-white/10 bg-gradient-to-b ${column.color} p-3`}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={async (e) => {
-                      e.preventDefault();
-                      const taskId = e.dataTransfer.getData("taskId") as Id<"tasks"> | "";
-                      if (!taskId) return;
-                      await moveTaskToStatus(taskId, column.id as TaskStatus);
-                    }}
-                  >
-                    {columnTasks.length === 0 && (
-                      <div className="flex h-28 items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20">
-                        <p className="text-xs uppercase tracking-wider text-zinc-600">Drop Tasks Here</p>
-                      </div>
-                    )}
-
-                    {columnTasks.map((task) => {
-                      return (
-                        <div
-                          key={task._id}
-                          draggable
-                          onDragStart={(e) => e.dataTransfer.setData("taskId", task._id)}
-                          className={`mb-3 cursor-grab rounded-xl border bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-3.5 transition-colors active:cursor-grabbing ${
-                            selectedTaskId === task._id
-                              ? "border-cyan-300/40 ring-1 ring-cyan-300/35"
-                              : "border-white/10 hover:border-white/20"
-                          }`}
-                        >
-                          <div className="mb-2 flex items-center justify-between gap-2">
-                            <span
-                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${priorityClass(
-                                task.priority
-                              )}`}
-                            >
-                              {task.priority}
-                            </span>
-                            <span className="font-mono text-[10px] text-zinc-600">#{task._id.slice(-4)}</span>
-                          </div>
-
-                          <h4 className="line-clamp-2 text-sm font-semibold leading-tight text-zinc-100">
-                            {task.title}
-                          </h4>
-                          <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-400">
-                            {task.description || "No description"}
-                          </p>
-
-                          {task.tags && task.tags.length > 0 && (
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {task.tags.slice(0, 4).map((tag) => (
-                                <span
-                                  key={tag}
-                                  className="rounded-full border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[10px] text-zinc-400"
-                                >
-                                  {tag}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-
-                          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
-                            <span>{task.assigneeIds.length > 0 ? "Assigned" : "Unassigned"}</span>
-                            <span>{timeAgo(task.updatedAt || task.createdAt)}</span>
-                          </div>
-
-                          <div className="mt-2 flex items-center justify-between gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedTaskId(task._id)}
-                              className="rounded-lg border border-cyan-300/30 bg-cyan-500/12 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20"
-                            >
-                              Open
-                            </button>
-                          </div>
+                    <div
+                      className={`relative min-h-[50vh] overflow-y-auto rounded-2xl border border-white/10 bg-gradient-to-b ${column.color} p-3`}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={async (e) => {
+                        e.preventDefault();
+                        const taskId = e.dataTransfer.getData("taskId") as Id<"tasks"> | "";
+                        if (!taskId) return;
+                        await moveTaskToStatus(taskId, column.id as TaskStatus);
+                      }}
+                    >
+                      {columnTasks.length === 0 && (
+                        <div className="flex h-28 items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20">
+                          <p className="text-xs uppercase tracking-wider text-zinc-600">Drop Tasks Here</p>
                         </div>
-                      );
-                    })}
+                      )}
+
+                      {columnTasks.map((task) => {
+                        return (
+                          <div
+                            key={task._id}
+                            draggable
+                            onDragStart={(e) => e.dataTransfer.setData("taskId", task._id)}
+                            className={`mb-3 cursor-grab rounded-xl border bg-gradient-to-b from-white/[0.05] to-white/[0.02] p-3.5 transition-colors active:cursor-grabbing ${
+                              selectedTaskId === task._id
+                                ? "border-cyan-300/40 ring-1 ring-cyan-300/35"
+                                : "border-white/10 hover:border-white/20"
+                            }`}
+                          >
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <span
+                                className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${priorityClass(
+                                  task.priority
+                                )}`}
+                              >
+                                {task.priority}
+                              </span>
+                              <span className="font-mono text-[10px] text-zinc-600">#{task._id.slice(-4)}</span>
+                            </div>
+
+                            <h4 className="line-clamp-2 text-sm font-semibold leading-tight text-zinc-100">
+                              {task.title}
+                            </h4>
+                            <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-400">
+                              {task.description || "No description"}
+                            </p>
+
+                            {task.tags && task.tags.length > 0 && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {task.tags.slice(0, 4).map((tag) => (
+                                  <span
+                                    key={tag}
+                                    className="rounded-full border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[10px] text-zinc-400"
+                                  >
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+
+                            <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+                              <span>{task.assigneeIds.length > 0 ? "Assigned" : "Unassigned"}</span>
+                              <span>{timeAgo(task.updatedAt || task.createdAt)}</span>
+                            </div>
+
+                            <div className="mt-2 flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTaskId(task._id)}
+                                className="rounded-lg border border-cyan-300/30 bg-cyan-500/12 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20"
+                              >
+                                Open
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
+                );
+              })}
+            </div>
+          </section>
+
+          <RightSidebar
+            className="hidden xl:block"
+            selectedDocumentId={selectedDocumentId}
+            onSelectDocument={selectDocument}
+            onPreviewDocument={previewDocument}
+          />
+        </div>
       </div>
 
       <AddTaskModal isOpen={showAddTaskModal} onClose={() => setShowAddTaskModal(false)} />
@@ -339,8 +372,40 @@ export default function TasksPage() {
           <TaskDetailPanel
             taskId={selectedTaskId}
             onClose={() => setSelectedTaskId(null)}
+            onPreviewDocument={previewDocument}
           />
         </>
+      )}
+
+      {selectedDocumentId && showConversationTray && (
+        <>
+          <div
+            className="fixed inset-0 z-[93] bg-black/45 backdrop-blur-[1px]"
+            onClick={() => {
+              setShowConversationTray(false);
+              setShowPreviewTray(false);
+              setSelectedDocumentId(null);
+            }}
+            aria-hidden="true"
+          />
+          <DocumentConversationTray
+            documentId={selectedDocumentId}
+            onClose={() => {
+              setShowConversationTray(false);
+              setShowPreviewTray(false);
+              setSelectedDocumentId(null);
+            }}
+            onOpenPreview={() => setShowPreviewTray(true)}
+          />
+        </>
+      )}
+
+      {selectedDocumentId && showPreviewTray && (
+        <DocumentPreviewTray
+          documentId={selectedDocumentId}
+          withConversationOpen={showConversationTray}
+          onClose={() => setShowPreviewTray(false)}
+        />
       )}
     </div>
   );

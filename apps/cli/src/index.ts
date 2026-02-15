@@ -4,7 +4,9 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "@motoko/db";
-import { MissionControlRuntime, type RuntimeConfig } from "@motoko/agents";
+import { MissionControlRuntime, runOpenClawJson, type RuntimeConfig } from "@motoko/agents";
+import os from "os";
+import path from "path";
 
 const program = new Command();
 
@@ -22,6 +24,18 @@ interface AgentRow {
   systemPrompt?: string;
   models?: unknown;
   createdAt: number;
+}
+
+interface OpenClawAgentRow {
+  id: string;
+  model?: string;
+}
+
+interface OpenClawModelsList {
+  models?: Array<{
+    key?: string;
+    available?: boolean;
+  }>;
 }
 
 type TaskStatus =
@@ -57,6 +71,14 @@ function getConvexClient(): ConvexHttpClient {
     process.exit(1);
   }
   return new ConvexHttpClient(convexUrl);
+}
+
+function agentIdFromSessionKey(sessionKey: string): string {
+  const parts = sessionKey.split(":");
+  if (parts.length >= 2 && parts[0] === "agent" && parts[1]) {
+    return parts[1];
+  }
+  return "main";
 }
 
 program
@@ -296,12 +318,13 @@ const runtimeCmd = program
 runtimeCmd
   .command("start")
   .description("Start the unified runtime service")
+  .option("--url <url>", "Convex deployment URL (overrides environment variables)")
   .option("-c, --concurrency <number>", "Number of concurrent workers", "3")
   .option("--claim-ttl <ms>", "Claim TTL in milliseconds", "60000")
   .action(async (options) => {
-    const convexUrl = process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+    const convexUrl = options.url || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
     if (!convexUrl) {
-      console.error(chalk.red("Error: CONVEX_URL or NEXT_PUBLIC_CONVEX_URL environment variable is required"));
+      console.error(chalk.red("Error: provide --url or set CONVEX_URL / NEXT_PUBLIC_CONVEX_URL"));
       process.exit(1);
     }
 
@@ -349,6 +372,162 @@ runtimeCmd
   .description("Check runtime status")
   .action(() => {
     console.log(chalk.blue("Runtime status check not implemented yet"));
+  });
+
+runtimeCmd
+  .command("sync-agents")
+  .description("Sync Convex agents into OpenClaw")
+  .option("--url <url>", "Convex deployment URL (overrides environment variables)")
+  .option(
+    "--workspace-root <path>",
+    "OpenClaw workspace root",
+    process.env.OPENCLAW_WORKSPACE_ROOT || path.join(os.homedir(), ".openclaw", "workspace")
+  )
+  .option(
+    "--recreate-model-mismatch",
+    "Recreate existing OpenClaw agents when their model differs from target",
+    true
+  )
+  .option("--dry-run", "Show planned actions without creating agents")
+  .action(async (options) => {
+    const convexUrl = options.url || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL;
+    if (!convexUrl) {
+      console.error(chalk.red("Error: provide --url or set CONVEX_URL / NEXT_PUBLIC_CONVEX_URL"));
+      process.exit(1);
+    }
+
+    const client = new ConvexHttpClient(convexUrl);
+    const workspaceRoot = String(options.workspaceRoot);
+    const dryRun = Boolean(options.dryRun);
+
+    try {
+      const convexAgents = (await client.query(api.agents.list, {})) as AgentRow[];
+      const existingOpenClawAgents = (await runOpenClawJson<OpenClawAgentRow[]>([
+        "agents",
+        "list",
+        "--json",
+      ])) as OpenClawAgentRow[];
+      const existingById = new Map(existingOpenClawAgents.map((agent) => [agent.id, agent]));
+      const existingIds = new Set(existingById.keys());
+
+      const modelsResponse = (await runOpenClawJson<OpenClawModelsList>([
+        "models",
+        "list",
+        "--json",
+      ])) as OpenClawModelsList;
+      const availableModelIds = new Set(
+        (modelsResponse.models ?? [])
+          .filter((row) => row.available !== false && typeof row.key === "string" && row.key)
+          .map((row) => String(row.key))
+      );
+      const fallbackModel = Array.from(availableModelIds)[0] || "";
+
+      console.log(chalk.bold("\nOpenClaw Agent Sync\n"));
+      console.log(chalk.dim(`Convex URL: ${convexUrl}`));
+      console.log(chalk.dim(`Workspace root: ${workspaceRoot}`));
+      console.log(chalk.dim(`Convex agents: ${convexAgents.length}`));
+      console.log(chalk.dim(`OpenClaw agents: ${existingIds.size}\n`));
+      console.log(chalk.dim(`Available models: ${availableModelIds.size || 0}`));
+      if (fallbackModel) {
+        console.log(chalk.dim(`Fallback model: ${fallbackModel}\n`));
+      }
+
+      let created = 0;
+      let skipped = 0;
+      let recreated = 0;
+      const recreateModelMismatch = Boolean(options.recreateModelMismatch);
+
+      for (const agent of convexAgents) {
+        const openclawAgentId = agentIdFromSessionKey(agent.sessionKey);
+        const existing = existingById.get(openclawAgentId);
+
+        const workspacePath =
+          openclawAgentId === "main"
+            ? workspaceRoot
+            : path.join(workspaceRoot, openclawAgentId);
+
+        const configuredModel =
+          agent.models && typeof agent.models === "object" && "thinking" in agent.models
+            ? String((agent.models as { thinking?: unknown }).thinking || "")
+            : "";
+        const targetModel =
+          configuredModel && availableModelIds.has(configuredModel)
+            ? configuredModel
+            : fallbackModel;
+
+        if (!existing) {
+          const addArgs = [
+            "agents",
+            "add",
+            openclawAgentId,
+            "--workspace",
+            workspacePath,
+            "--non-interactive",
+            "--json",
+          ];
+          if (targetModel) {
+            addArgs.push("--model", targetModel);
+          }
+
+          if (dryRun) {
+            console.log(chalk.yellow(`PLAN  ${openclawAgentId} -> ${workspacePath}`));
+          } else {
+            await runOpenClawJson(addArgs);
+            existingIds.add(openclawAgentId);
+            existingById.set(openclawAgentId, { id: openclawAgentId, model: targetModel || undefined });
+            created += 1;
+            console.log(chalk.green(`ADD   ${openclawAgentId} -> ${workspacePath}`));
+          }
+        } else {
+          skipped += 1;
+          console.log(chalk.gray(`SKIP  ${openclawAgentId} (already exists)`));
+        }
+
+        const currentModel = existingById.get(openclawAgentId)?.model || "";
+        if (targetModel && currentModel !== targetModel) {
+          if (dryRun) {
+            console.log(
+              chalk.yellow(
+                `PLAN  recreate ${openclawAgentId} model ${currentModel || "unknown"} -> ${targetModel}`
+              )
+            );
+          } else if (recreateModelMismatch) {
+            await runOpenClawJson(["agents", "delete", openclawAgentId, "--force", "--json"]);
+
+            const recreateArgs = [
+              "agents",
+              "add",
+              openclawAgentId,
+              "--workspace",
+              workspacePath,
+              "--model",
+              targetModel,
+              "--non-interactive",
+              "--json",
+            ];
+            await runOpenClawJson(recreateArgs);
+            existingById.set(openclawAgentId, { id: openclawAgentId, model: targetModel });
+            recreated += 1;
+            console.log(chalk.cyan(`RECREATE ${openclawAgentId} -> ${targetModel}`));
+          } else {
+            console.log(
+              chalk.yellow(
+                `WARN  ${openclawAgentId} model mismatch (${currentModel || "unknown"} vs ${targetModel})`
+              )
+            );
+          }
+        }
+      }
+
+      console.log(
+        chalk.bold(
+          `\nSync complete. Created=${created}, Recreated=${recreated}, Skipped=${skipped}, Total=${existingIds.size}\n`
+        )
+      );
+    } catch (error) {
+      console.error(chalk.red("Agent sync failed:"), error);
+      process.exit(1);
+    }
   });
 
 program
